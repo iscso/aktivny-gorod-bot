@@ -14,7 +14,12 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-giga = GigaChat(credentials=os.environ.get("GIGACHAT_CREDENTIALS"))
+# ВАЖНО: verify_ssl_certs=False решает проблему с сертификатами Минцифры в облаке
+giga = GigaChat(
+    credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
+    verify_ssl_certs=False,
+    model="GigaChat"
+)
 
 # --- Определение состояний (FSM) ---
 class Registration(StatesGroup):
@@ -59,7 +64,6 @@ async def start_handler(message, state: FSMContext):
 async def process_consent(callback, state: FSMContext):
     await callback.answer(notification="Согласие принято")
     
-    # Пытаемся удалить сообщение с кнопкой (если поддерживается)
     try:
         await callback.message.delete()
     except Exception:
@@ -92,7 +96,6 @@ async def process_org(message, state: FSMContext):
     await state.update_data(org=text)
     data = await state.get_data()
     
-    # Вывод в логи (для проверки)
     print(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО: {data.get('fio')} | Орг: {data.get('org')}")
     
     await state.set_state(Registration.registered)
@@ -118,14 +121,17 @@ async def ai_handler(message):
             "Помогай горожанам находить события, волонтёрские возможности и меры поддержки.\n"
             f"Вопрос пользователя: {user_text}"
         )
+        
         response = await giga.achat.create(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
         )
         answer = response.messages[0].content[0].text
+        
     except Exception as e:
+        # Выводим реальную ошибку в логи Bothost, чтобы понимать, что не так
+        print(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}")
         answer = "Извините, сервис временно недоступен. Попробуйте позже."
-        print(f"GigaChat error: {e}")
 
     await message.answer(text=answer)
 
