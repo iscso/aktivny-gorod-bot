@@ -9,7 +9,7 @@ from maxgram.fsm.state import State, StatesGroup
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 from gigachat import GigaChat
 
-# Настройка логирования для вывода ошибок в Bothost
+# Настройка логирования для Bothost
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-# ВАЖНО: verify_ssl_certs=False решает проблему с сертификатами в облаке
+# Инициализация GigaChat (отключена проверка SSL для облака)
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -127,16 +127,22 @@ async def ai_handler(message):
             f"Вопрос пользователя: {user_text}"
         )
         
-        response = await giga.achat.create(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-        )
-        answer = response.messages[0].content[0].text
+        # Исправленный вызов: передаем строку напрямую
+        response = await giga.achat.create(prompt)
+        
+        # Универсальная распаковка ответа (на случай разных версий SDK)
+        try:
+            answer = response.messages[0].content[0].text
+        except (AttributeError, IndexError):
+            try:
+                answer = response.choices[0].message.content
+            except (AttributeError, IndexError):
+                answer = str(response)
         
     except Exception as e:
-        # Выводим полную ошибку в логи Bothost для диагностики
         logger.error(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}", exc_info=True)
-        answer = "Извините, сервис временно недоступен. Попробуйте позже."
+        # ВРЕМЕННО ДЛЯ ОТЛАДКИ
+        answer = f"🛠 РЕЖИМ ОТЛАДКИ\nТип ошибки: {type(e).__name__}\nТекст: {e}"
 
     await message.answer(text=answer)
 
