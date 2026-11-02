@@ -2,8 +2,9 @@ import asyncio
 import os
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
-from maxgram.fsm import FSMContext, MemoryStorage
 from maxgram.fsm.state import State, StatesGroup
+from maxgram.fsm.context import FSMContext
+from maxgram.fsm.storage.memory import MemoryStorage
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 from gigachat import GigaChat
 
