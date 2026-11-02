@@ -84,8 +84,19 @@ async def process_fio(message, state: FSMContext):
     text = get_text(message)
     if not text:
         return
-        
-    await state.update_data(fio=text)
+
+    # Автоматическое получение MAX ID пользователя
+    max_user_id = None
+    if hasattr(message, 'sender') and hasattr(message.sender, 'user_id'):
+        max_user_id = message.sender.user_id
+    elif hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
+        max_user_id = message.from_user.id
+
+    # Сохраняем ФИО и MAX ID
+    await state.update_data(fio=text, max_user_id=max_user_id)
+    
+    logger.info(f"ШАГ РЕГИСТРАЦИИ: ФИО={text}, MAX_ID={max_user_id}")
+
     await state.set_state(Registration.waiting_for_org)
     await message.answer(
         f"Спасибо, {text}!\n\n"
@@ -101,7 +112,8 @@ async def process_org(message, state: FSMContext):
     await state.update_data(org=text)
     data = await state.get_data()
     
-    logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО: {data.get('fio')} | Орг: {data.get('org')}")
+    # Выводим в логи полный профиль (ФИО, Орг, MAX ID)
+    logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО={data.get('fio')} | Орг={data.get('org')} | MAX_ID={data.get('max_user_id')}")
     
     await state.set_state(Registration.registered)
     
@@ -127,21 +139,13 @@ async def ai_handler(message):
             f"Вопрос пользователя: {user_text}"
         )
         
-        # Исправленный вызов: передаем строку напрямую
+        # Правильный вызов для SDK 0.2.4+ (без аргумента messages)
         response = await giga.achat.create(prompt)
-        
-        # Универсальная распаковка ответа (на случай разных версий SDK)
-        try:
-            answer = response.messages[0].content[0].text
-        except (AttributeError, IndexError):
-            try:
-                answer = response.choices[0].message.content
-            except (AttributeError, IndexError):
-                answer = str(response)
+        answer = response.messages[0].content[0].text
         
     except Exception as e:
         logger.error(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}", exc_info=True)
-        # ВРЕМЕННО ДЛЯ ОТЛАДКИ
+        # ВРЕМЕННО ДЛЯ ОТЛАДКИ: бот пришлет ошибку прямо в чат
         answer = f"🛠 РЕЖИМ ОТЛАДКИ\nТип ошибки: {type(e).__name__}\nТекст: {e}"
 
     await message.answer(text=answer)
@@ -150,6 +154,15 @@ async def ai_handler(message):
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы продолжить.")
+
+# ==========================================
+# ЗАПАСНОЙ ОБРАБОТЧИК (на случай сброса памяти)
+# ==========================================
+@router.message()
+async def fallback_handler(message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Похоже, ваша сессия сбросилась после обновления бота. Пожалуйста, нажмите /start, чтобы начать заново.")
 
 # ==========================================
 # ЗАПУСК
