@@ -19,11 +19,12 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-# Инициализация GigaChat (отключена проверка SSL для облака)
+# Инициализация GigaChat для ФИЗЛИЦ с моделью MAX
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
-    model="GigaChat"
+    model="GigaChat-Max",           # Модель по вашему запросу
+    scope="GIGACHAT_API_PERS"       # Область доступа для физических лиц
 )
 
 # --- Определение состояний (FSM) ---
@@ -49,6 +50,7 @@ def get_text(message) -> str:
 @router.bot_started()
 @router.message(Command("start"))
 async def start_handler(message, state: FSMContext):
+    logger.info(">>> СРАБОТАЛ START_HANDLER")
     await state.clear()
     
     welcome_text = (
@@ -67,6 +69,7 @@ async def start_handler(message, state: FSMContext):
 
 @router.message_callback(F.payload == "consent_agree")
 async def process_consent(callback, state: FSMContext):
+    logger.info(">>> СРАБОТАЛ PROCESS_CONSENT")
     await callback.answer(notification="Согласие принято")
     
     try:
@@ -81,6 +84,7 @@ async def process_consent(callback, state: FSMContext):
 
 @router.message(Registration.waiting_for_fio)
 async def process_fio(message, state: FSMContext):
+    logger.info(">>> СРАБОТАЛ PROCESS_FIO")
     text = get_text(message)
     if not text:
         return
@@ -92,9 +96,7 @@ async def process_fio(message, state: FSMContext):
     elif hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
         max_user_id = message.from_user.id
 
-    # Сохраняем ФИО и MAX ID
     await state.update_data(fio=text, max_user_id=max_user_id)
-    
     logger.info(f"ШАГ РЕГИСТРАЦИИ: ФИО={text}, MAX_ID={max_user_id}")
 
     await state.set_state(Registration.waiting_for_org)
@@ -105,6 +107,7 @@ async def process_fio(message, state: FSMContext):
 
 @router.message(Registration.waiting_for_org)
 async def process_org(message, state: FSMContext):
+    logger.info(">>> СРАБОТАЛ PROCESS_ORG")
     text = get_text(message)
     if not text:
         return
@@ -112,7 +115,6 @@ async def process_org(message, state: FSMContext):
     await state.update_data(org=text)
     data = await state.get_data()
     
-    # Выводим в логи полный профиль (ФИО, Орг, MAX ID)
     logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО={data.get('fio')} | Орг={data.get('org')} | MAX_ID={data.get('max_user_id')}")
     
     await state.set_state(Registration.registered)
@@ -128,6 +130,7 @@ async def process_org(message, state: FSMContext):
 
 @router.message(Registration.registered)
 async def ai_handler(message):
+    logger.info(">>> СРАБОТАЛ AI_HANDLER")
     user_text = get_text(message)
     if not user_text:
         return
@@ -139,30 +142,34 @@ async def ai_handler(message):
             f"Вопрос пользователя: {user_text}"
         )
         
-        # Правильный вызов для SDK 0.2.4+ (без аргумента messages)
+        # Вызов GigaChat (строка напрямую, без messages)
         response = await giga.achat.create(prompt)
         answer = response.messages[0].content[0].text
         
     except Exception as e:
         logger.error(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}", exc_info=True)
-        # ВРЕМЕННО ДЛЯ ОТЛАДКИ: бот пришлет ошибку прямо в чат
         answer = f"🛠 РЕЖИМ ОТЛАДКИ\nТип ошибки: {type(e).__name__}\nТекст: {e}"
 
     await message.answer(text=answer)
 
-# Блокировка для тех, кто не нажал кнопку
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
+    logger.info(">>> СРАБОТАЛ BLOCK_UNTIL_CONSENT")
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы продолжить.")
 
 # ==========================================
-# ЗАПАСНОЙ ОБРАБОТЧИК (на случай сброса памяти)
+# ЗАПАСНОЙ ОБРАБОТЧИК (Ловит всё остальное)
 # ==========================================
-@router.message()
+@router.message(F.text)
 async def fallback_handler(message, state: FSMContext):
     current_state = await state.get_state()
+    logger.info(f">>> СРАБОТАЛ FALLBACK_HANDLER. Текущее состояние: {current_state}")
+    
     if current_state is None:
-        await message.answer("Похоже, ваша сессия сбросилась после обновления бота. Пожалуйста, нажмите /start, чтобы начать заново.")
+        # Если бот перезагрузился и забыл пользователя, запускаем старт
+        await start_handler(message, state)
+    else:
+        await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /start, чтобы обновить меню.")
 
 # ==========================================
 # ЗАПУСК
