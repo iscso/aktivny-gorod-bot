@@ -1,5 +1,6 @@
 import asyncio
 import os
+import logging
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
 from maxgram.fsm.context import FSMContext
@@ -8,13 +9,17 @@ from maxgram.fsm.state import State, StatesGroup
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 from gigachat import GigaChat
 
+# Настройка логирования для вывода ошибок в Bothost
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # --- Инициализация ---
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-# ВАЖНО: verify_ssl_certs=False решает проблему с сертификатами Минцифры в облаке
+# ВАЖНО: verify_ssl_certs=False решает проблему с сертификатами в облаке
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -96,7 +101,7 @@ async def process_org(message, state: FSMContext):
     await state.update_data(org=text)
     data = await state.get_data()
     
-    print(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО: {data.get('fio')} | Орг: {data.get('org')}")
+    logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО: {data.get('fio')} | Орг: {data.get('org')}")
     
     await state.set_state(Registration.registered)
     
@@ -129,8 +134,8 @@ async def ai_handler(message):
         answer = response.messages[0].content[0].text
         
     except Exception as e:
-        # Выводим реальную ошибку в логи Bothost, чтобы понимать, что не так
-        print(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}")
+        # Выводим полную ошибку в логи Bothost для диагностики
+        logger.error(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}", exc_info=True)
         answer = "Извините, сервис временно недоступен. Попробуйте позже."
 
     await message.answer(text=answer)
