@@ -1,4 +1,4 @@
-import asyncio
+\import asyncio
 import os
 import re
 import logging
@@ -108,18 +108,6 @@ def get_user_id(message):
         return message.from_user.id
     return None
 
-def get_chat_id(message):
-    if hasattr(message, 'chat') and hasattr(message.chat, 'id'):
-        return message.chat.id
-    if hasattr(message, 'recipient'):
-        if hasattr(message.recipient, 'chat_id'):
-            return message.recipient.chat_id
-        if hasattr(message.recipient, 'user_id'):
-            return message.recipient.user_id
-    if hasattr(message, 'dialog_id'):
-        return message.dialog_id
-    return get_user_id(message)
-
 def clean_text(text: str) -> str:
     if not text:
         return text
@@ -165,11 +153,20 @@ async def upload_knowledge_base():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
-async def send_document_via_max_api(chat_id: int, file_path: str, filename: str, caption: str = None) -> bool:
-    headers = {"Authorization": MAX_BOT_TOKEN}
+# ==========================================
+# ОТПРАВКА ДОКУМЕНТОВ (ИСПРАВЛЕНО ПОД MAX API)
+# ==========================================
+
+async def send_document_via_max_api(recipient_id: int, file_path: str, filename: str, caption: str = None, is_chat: bool = False) -> bool:
+    """
+    Отправляет документ через прямой API MAX.
+    Для личных диалогов использует user_id, для групповых чатов — chat_id.
+    """
+    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
+            # 1. Получаем URL для загрузки файла
             async with session.post(
                 f"{MAX_API_BASE}/uploads?type=file",
                 headers=headers
@@ -183,6 +180,7 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
                     logger.error("В ответе API нет URL для загрузки")
                     return False
 
+            # 2. Загружаем файл
             with open(file_path, "rb") as f:
                 form_data = aiohttp.FormData()
                 form_data.add_field("data", f, filename=filename)
@@ -192,8 +190,14 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
                         return False
                     upload_payload = await upload_resp.json()
 
+            # 3. Отправляем сообщение с файлом
+            # Для личных диалогов используем user_id в URL, для чатов — chat_id
+            if is_chat:
+                url = f"{MAX_API_BASE}/messages?chat_id={recipient_id}"
+            else:
+                url = f"{MAX_API_BASE}/messages?user_id={recipient_id}"
+
             payload = {
-                "chat_id": chat_id,
                 "text": caption or filename,
                 "attachments": [
                     {
@@ -202,8 +206,9 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
                     }
                 ]
             }
+
             async with session.post(
-                f"{MAX_API_BASE}/messages",
+                url,
                 headers={**headers, "Content-Type": "application/json"},
                 json=payload
             ) as msg_resp:
@@ -211,12 +216,16 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
                     logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status} {await msg_resp.text()}")
                     return False
 
-        logger.info(f"✅ Документ {filename} успешно отправлен в чат {chat_id}")
+        logger.info(f"✅ Документ {filename} успешно отправлен получателю {recipient_id}")
         return True
 
     except Exception as e:
         logger.error(f"Исключение при отправке документа: {e}", exc_info=True)
         return False
+
+# ==========================================
+# СОСТОЯНИЯ (FSM)
+# ==========================================
 
 class Registration(StatesGroup):
     waiting_for_consent = State()
@@ -230,6 +239,10 @@ class Feedback(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_for_file = State()
+
+# ==========================================
+# СТАРТ И РЕГИСТРАЦИЯ
+# ==========================================
 
 @router.bot_started()
 @router.message(Command("start"))
@@ -362,6 +375,10 @@ async def process_feedback_comment(message, state: FSMContext):
         keyboard=get_main_menu()
     )
 
+# ==========================================
+# АДМИН-ПАНЕЛЬ
+# ==========================================
+
 @router.message(Command("admin"))
 async def admin_panel(message):
     user_id = get_user_id(message)
@@ -449,16 +466,13 @@ async def export_history(message):
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
-    chat_id = get_chat_id(message)
-    if not chat_id:
-        await message.answer("Не удалось определить ID чата для отправки файла.")
-        return
-
+    # Для личных диалогов используем user_id
     success = await send_document_via_max_api(
-        chat_id=chat_id,
+        recipient_id=user_id,
         file_path=file_path,
         filename="history.csv",
-        caption="📊 История диалогов"
+        caption="📊 История диалогов",
+        is_chat=False
     )
 
     if not success:
