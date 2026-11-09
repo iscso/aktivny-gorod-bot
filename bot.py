@@ -20,6 +20,7 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
+# --- Инициализация GigaChat ---
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -28,12 +29,10 @@ giga = GigaChat(
 )
 
 # --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
-# В Bothost нужно добавить переменную ADMIN_IDS (например: 12345678,87654321)
 admin_ids_str = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = []
 if admin_ids_str:
     try:
-        # Разбиваем строку по запятой и превращаем в список чисел
         ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
         logger.info(f"✅ Загружены ID администраторов: {ADMIN_IDS}")
     except Exception as e:
@@ -46,6 +45,7 @@ TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
+# В Bothost файл сохраняется в /app/data/
 DB_PATH = "/app/data/bot_history.db"
 
 def init_db():
@@ -124,10 +124,13 @@ def get_main_menu():
 async def upload_knowledge_base():
     global KNOWLEDGE_FILE_ID
     try:
+        # Пытаемся открыть файл. Если его нет, вызовется FileNotFoundError
         with open("knowledge_base.pdf", "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             KNOWLEDGE_FILE_ID = uploaded.id
             logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
+    except FileNotFoundError:
+        logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать без базы знаний (в обычном режиме).")
     except Exception as e:
         logger.error(f"❌ Не удалось загрузить базу знаний: {e}")
 
@@ -282,7 +285,7 @@ async def process_feedback_comment(message, state: FSMContext):
     )
 
 # ==========================================
-# ОСНОВНОЙ ОБРАБОТЧИК (С СОХРАНЕНИЕМ ИСТОРИИ)
+# ОСНОВНОЙ ОБРАБОТЧИК (ИИ + ИСТОРИЯ)
 # ==========================================
 
 @router.message(Registration.registered)
@@ -298,19 +301,26 @@ async def ai_handler(message):
     # 1. Сохраняем вопрос
     save_message(user_id, "user", user_text)
 
-    if not KNOWLEDGE_FILE_ID:
-        await message.answer(f"База знаний недоступна. Пишите: {TECH_SUPPORT_EMAIL}")
-        return
-
     try:
         prompt = (
             "Ты — экспертный ИИ-ассистент «Активный город». "
-            "Отвечай ТОЛЬКО на основе документа. "
-            f"Если ответа нет, скажи: «Нет информации. Обратитесь в УОС: {UOS_PHONE}».\n\n"
+            "Помогай активистам ТОС и НКО Новосибирской области: "
+            "пиши посты, придумывай идеи для презентаций, помогай с грантами.\n\n"
             f"Вопрос: {user_text}"
         )
         
-        response = await giga.achat.create(prompt, attachments=[KNOWLEDGE_FILE_ID])
+        # Если база знаний загружена — используем её, иначе — обычный запрос
+        if KNOWLEDGE_FILE_ID:
+            prompt = (
+                "Ты — экспертный ИИ-ассистент «Активный город». "
+                "Отвечай ТОЛЬКО на основе прикрепленного документа. "
+                f"Если ответа нет, скажи: «Нет информации. Обратитесь в УОС: {UOS_PHONE}».\n\n"
+                f"Вопрос: {user_text}"
+            )
+            response = await giga.achat.create(prompt, attachments=[KNOWLEDGE_FILE_ID])
+        else:
+            response = await giga.achat.create(prompt)
+        
         raw_answer = response.messages[0].content[0].text
         clean_answer = clean_text(raw_answer)
         
@@ -318,7 +328,7 @@ async def ai_handler(message):
         answer = clean_answer + disclaimer
         
     except Exception as e:
-        logger.error(f"!!! ОШИБКА: {e}", exc_info=True)
+        logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
         answer = f"🛠 Техническая ошибка. Пишите: {TECH_SUPPORT_EMAIL}"
 
     # 2. Сохраняем ответ
@@ -328,14 +338,13 @@ async def ai_handler(message):
     await message.answer(text=answer)
 
 # ==========================================
-# АДМИН-ПАНЕЛЬ (ПРОВЕРКА ПО ПЕРЕМЕННОЙ ОКРУЖЕНИЯ)
+# АДМИН-ПАНЕЛЬ (ИСТОРИЯ)
 # ==========================================
 
 @router.message(Command("admin"))
 async def admin_panel(message):
     user_id = get_user_id(message)
     
-    # Проверка: есть ли ID пользователя в списке админов
     if user_id not in ADMIN_IDS:
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
@@ -345,12 +354,12 @@ async def admin_panel(message):
         await message.answer("📭 История диалогов пока пуста.")
         return
 
-    text = "👑 **Админ-панель**\n\n"
+    text = "👑 Админ-панель\n\n"
     text += f"Всего пользователей: {len(users)}\n\n"
     text += "Чтобы посмотреть историю, отправьте:\n"
-    text += "`/history ID_ПОЛЬЗОВАТЕЛЯ`\n\n"
+    text += "/history ID_ПОЛЬЗОВАТЕЛЯ\n\n"
     text += "Доступные ID:\n"
-    text += ", ".join([f"`{u}`" for u in users[:20]])
+    text += ", ".join([f"{u}" for u in users[:20]])
     
     await message.answer(text=text)
 
@@ -364,7 +373,7 @@ async def show_user_history(message):
 
     parts = get_text(message).split()
     if len(parts) < 2:
-        await message.answer("Использование: `/history ID_ПОЛЬЗОВАТЕЛЯ`")
+        await message.answer("Использование: /history ID_ПОЛЬЗОВАТЕЛЯ")
         return
     
     try:
@@ -378,18 +387,35 @@ async def show_user_history(message):
         await message.answer(f"Для пользователя {target_id} история не найдена.")
         return
 
-    text = f"📜 **История диалога с {target_id}** (последние 30 сообщений)\n\n"
+    text = f"📜 История диалога с {target_id} (последние 30 сообщений)\n\n"
     for role, msg_text, ts in reversed(history):
         time_str = ts.strftime("%d.%m %H:%M") if ts else ""
         prefix = "👤" if role == "user" else "🤖"
-        short_text = msg_text[:100] + "..." if len(msg_text) > 100 else msg_text
+        short_text = msg_text[:150] + "..." if len(msg_text) > 150 else msg_text
         text += f"[{time_str}] {prefix}: {short_text}\n\n"
 
+    # Отправляем частями, если текст слишком длинный
     if len(text) > 4000:
         for i in range(0, len(text), 4000):
             await message.answer(text=text[i:i+4000])
     else:
         await message.answer(text=text)
+
+# ==========================================
+# БЛОКИРОВКИ И FALLBACK
+# ==========================================
+
+@router.message(Registration.waiting_for_consent)
+async def block_until_consent(message):
+    await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше.")
+
+@router.message(F.text)
+async def fallback_handler(message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await start_handler(message, state)
+    else:
+        await message.answer("Я вас не совсем понял. Нажмите /menu для выбора действия или /start для перезапуска.")
 
 # ==========================================
 # ЗАПУСК
