@@ -108,9 +108,7 @@ def get_user_id(message):
         return message.from_user.id
     return None
 
-# --- НОВАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ID ЧАТА ---
 def get_chat_id(message):
-    """Пытается найти ID чата в разных полях структуры сообщения MAX."""
     if hasattr(message, 'chat') and hasattr(message.chat, 'id'):
         return message.chat.id
     if hasattr(message, 'recipient'):
@@ -120,7 +118,6 @@ def get_chat_id(message):
             return message.recipient.user_id
     if hasattr(message, 'dialog_id'):
         return message.dialog_id
-    # Если ничего не нашли, возвращаем ID пользователя (для личных диалогов)
     return get_user_id(message)
 
 def clean_text(text: str) -> str:
@@ -169,36 +166,31 @@ async def upload_knowledge_base():
         logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
 async def send_document_via_max_api(chat_id: int, file_path: str, filename: str, caption: str = None) -> bool:
-    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
+    headers = {"Authorization": MAX_BOT_TOKEN}
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             async with session.post(
-                f"{MAX_API_BASE}/uploads",
-                headers=headers,
-                json={"type": "file"}
+                f"{MAX_API_BASE}/uploads?type=file",
+                headers=headers
             ) as resp:
                 if resp.status != 200:
                     logger.error(f"Ошибка получения URL для загрузки: {resp.status} {await resp.text()}")
                     return False
-                data = await resp.json()
-                upload_url = data.get("url")
+                upload_meta = await resp.json()
+                upload_url = upload_meta.get("url")
                 if not upload_url:
                     logger.error("В ответе API нет URL для загрузки")
                     return False
 
             with open(file_path, "rb") as f:
                 form_data = aiohttp.FormData()
-                form_data.add_field("file", f, filename=filename)
+                form_data.add_field("data", f, filename=filename)
                 async with session.post(upload_url, data=form_data) as upload_resp:
                     if upload_resp.status != 200:
                         logger.error(f"Ошибка загрузки файла: {upload_resp.status} {await upload_resp.text()}")
                         return False
-                    upload_data = await upload_resp.json()
-                    file_token = upload_data.get("token") or upload_data.get("file_id")
-                    if not file_token:
-                        logger.error("В ответе нет токена загруженного файла")
-                        return False
+                    upload_payload = await upload_resp.json()
 
             payload = {
                 "chat_id": chat_id,
@@ -206,18 +198,16 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
                 "attachments": [
                     {
                         "type": "file",
-                        "payload": {
-                            "file_id": file_token
-                        }
+                        "payload": upload_payload
                     }
                 ]
             }
             async with session.post(
                 f"{MAX_API_BASE}/messages",
-                headers=headers,
+                headers={**headers, "Content-Type": "application/json"},
                 json=payload
             ) as msg_resp:
-                if msg_resp.status != 200:
+                if msg_resp.status not in (200, 201):
                     logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status} {await msg_resp.text()}")
                     return False
 
@@ -459,7 +449,6 @@ async def export_history(message):
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
-    # Используем универсальную функцию получения chat_id
     chat_id = get_chat_id(message)
     if not chat_id:
         await message.answer("Не удалось определить ID чата для отправки файла.")
@@ -508,32 +497,30 @@ async def process_admin_file(message, state: FSMContext):
         await message.answer("Не удалось прочитать данные файла.")
         return
 
-    file_token = (
-        getattr(payload, 'token', None) or
-        getattr(payload, 'file_id', None) or
-        (payload.get('token') if isinstance(payload, dict) else None) or
-        (payload.get('file_id') if isinstance(payload, dict) else None)
-    )
-
-    if not file_token:
-        await message.answer("Не удалось распознать ID или токен файла.")
+    file_url = getattr(payload, 'url', None) or (payload.get('url') if isinstance(payload, dict) else None)
+    if not file_url:
+        await message.answer("Не удалось получить ссылку для скачивания файла.")
         return
 
-    await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
-
-    url = f"{MAX_API_BASE}/files/{file_token}"
-    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
+    thinking_msg = await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
+    headers = {"Authorization": MAX_BOT_TOKEN}
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-            async with session.get(url, headers=headers) as resp:
+            async with session.get(file_url, headers=headers) as resp:
                 if resp.status == 200:
                     content = await resp.read()
                     with open(KNOWLEDGE_FILE_PATH, "wb") as f:
                         f.write(content)
                 else:
+                    await thinking_msg.delete()
                     await message.answer(f"Ошибка скачивания файла (код {resp.status}).")
                     return
+
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
 
         global KNOWLEDGE_FILE_ID
         with open(KNOWLEDGE_FILE_PATH, "rb") as f:
@@ -557,6 +544,10 @@ async def process_admin_file(message, state: FSMContext):
                 
     except Exception as e:
         logger.error(f"Ошибка в админ-загрузке файла: {e}", exc_info=True)
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
         await message.answer(f"🛠 Произошла ошибка при обработке файла: {e}")
     
     finally:
