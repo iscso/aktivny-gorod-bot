@@ -11,6 +11,7 @@ from maxgram.fsm.storage.memory import MemoryStorage
 from maxgram.fsm.state import State, StatesGroup
 from maxgram.utils.keyboard import InlineKeyboardBuilder
 from gigachat import GigaChat
+from gigachat.models import Chat, Messages, MessagesRole  # <-- ДОБАВЛЕНЫ ИМПОРТЫ
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -318,6 +319,7 @@ async def ai_handler(message):
     save_message(user_id, "user", user_text)
 
     try:
+        # Базовый промпт для случая без базы знаний
         prompt = (
             "Ты — экспертный ИИ-ассистент «Активный город». "
             "Помогай активистам ТОС и НКО Новосибирской области: "
@@ -326,14 +328,26 @@ async def ai_handler(message):
         )
         
         if KNOWLEDGE_FILE_ID:
-            prompt = (
+            # Промпт с жёсткой привязкой к документу
+            prompt_with_kb = (
                 "Ты — экспертный ИИ-ассистент «Активный город». "
                 "Отвечай ТОЛЬКО на основе прикрепленного документа. "
                 f"Если ответа нет, скажи: «Нет информации. Обратитесь в УОС: {UOS_PHONE}».\n\n"
                 f"Вопрос: {user_text}"
             )
-            response = await giga.achat.create(prompt, attachments=[KNOWLEDGE_FILE_ID])
+            # ИСПРАВЛЕННЫЙ ВЫЗОВ: передача файла через Messages.attachments
+            chat = Chat(
+                messages=[
+                    Messages(
+                        role=MessagesRole.USER,
+                        content=prompt_with_kb,
+                        attachments=[KNOWLEDGE_FILE_ID]
+                    )
+                ]
+            )
+            response = await giga.achat(chat)
         else:
+            # Обычный вызов без вложений
             response = await giga.achat.create(prompt)
         
         raw_answer = response.messages[0].content[0].text
