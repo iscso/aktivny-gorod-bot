@@ -21,7 +21,6 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-# --- Инициализация GigaChat ---
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -29,7 +28,7 @@ giga = GigaChat(
     scope="GIGACHAT_API_PERS"
 )
 
-# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
+# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ---
 admin_ids_str = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = []
 if admin_ids_str:
@@ -110,7 +109,13 @@ def get_user_id(message):
 def clean_text(text: str) -> str:
     if not text:
         return text
-    return re.sub(r'[*#_]', '', text)
+    # Удаляем звездочки, решетки, подчеркивания
+    text = re.sub(r'[*#_]', '', text)
+    # Заменяем маркеры списков (дефисы) на аккуратные точки
+    text = re.sub(r'^\s*-\s+', '• ', text, flags=re.MULTILINE)
+    # Убираем разделители --- 
+    text = text.replace('---', '')
+    return text.strip()
 
 def get_main_menu():
     builder = InlineKeyboardBuilder()
@@ -133,19 +138,14 @@ async def upload_knowledge_base():
                 getattr(uploaded, 'file_id', None) or
                 getattr(uploaded, 'uuid', None)
             )
-            
-            if not file_id:
-                if hasattr(uploaded, '__dict__'):
-                    file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
-                elif hasattr(uploaded, 'model_dump'):
-                    dump = uploaded.model_dump()
-                    file_id = dump.get('id') or dump.get('id_')
+            if not file_id and hasattr(uploaded, '__dict__'):
+                file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
 
             if file_id:
                 KNOWLEDGE_FILE_ID = file_id
                 logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
             else:
-                logger.warning(f"⚠️ ID файла не найден. Доступные атрибуты: {dir(uploaded)}")
+                logger.warning(f"⚠️ ID файла не найден.")
                 
     except FileNotFoundError:
         logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать в обычном режиме.")
@@ -172,8 +172,8 @@ class Feedback(StatesGroup):
 async def start_handler(message, state: FSMContext):
     await state.clear()
     welcome_text = (
-        "👋 Добро пожаловать в бот «Активный город»!\n\n"
-        "Это интеллектуальный помощник для ТОС и НКО Новосибирской области.\n"
+        "👋 Здравствуйте! Добро пожаловать в бот «Активный город».\n\n"
+        "Я — ваш интеллектуальный помощник для ТОС и НКО Новосибирской области.\n"
         "Сервис разработан АНО «ИСКСО» при поддержке Управления общественных связей мэрии города Новосибирска.\n\n"
         f"Пожалуйста, ознакомьтесь с документом:\n{CONSENT_URL}\n\n"
         "Нажимая кнопку ниже, вы подтверждаете, что ознакомились и согласны с условиями.\n\n"
@@ -186,13 +186,13 @@ async def start_handler(message, state: FSMContext):
 
 @router.message_callback(F.payload == "consent_agree")
 async def process_consent(callback, state: FSMContext):
-    await callback.answer(notification="Согласие принято")
+    await callback.answer(notification="Спасибо за согласие")
     try:
         await callback.message.delete()
     except Exception:
         pass
     await state.set_state(Registration.waiting_for_fio)
-    await callback.message.answer("Отлично! Напишите ваши ФИО:")
+    await callback.message.answer("Отлично! Пожалуйста, напишите ваши ФИО:")
 
 @router.message(Registration.waiting_for_fio)
 async def process_fio(message, state: FSMContext):
@@ -202,7 +202,7 @@ async def process_fio(message, state: FSMContext):
     max_user_id = get_user_id(message)
     await state.update_data(fio=text, max_user_id=max_user_id)
     await state.set_state(Registration.waiting_for_org)
-    await message.answer(f"Спасибо, {text}!\n\nУкажите организацию (ТОС или НКО):")
+    await message.answer(f"Спасибо, {text}! Очень приятно познакомиться.\n\nПодскажите, пожалуйста, какую организацию (ТОС или НКО) вы представляете?")
 
 @router.message(Registration.waiting_for_org)
 async def process_org(message, state: FSMContext):
@@ -214,8 +214,8 @@ async def process_org(message, state: FSMContext):
     logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО={data.get('fio')} | Орг={data.get('org')} | MAX_ID={data.get('max_user_id')}")
     await state.set_state(Registration.registered)
     await message.answer(
-        "🎉 Регистрация завершена!\n\n"
-        "Теперь вы можете задавать вопросы или воспользоваться меню.",
+        "🎉 Спасибо! Регистрация успешно завершена.\n\n"
+        "Теперь я в вашем распоряжении. Вы можете задать мне любой вопрос или воспользоваться меню.",
         keyboard=get_main_menu()
     )
 
@@ -233,12 +233,12 @@ async def menu_handler(message, state: FSMContext):
 
 @router.message_callback(F.payload == "menu:start_work")
 async def menu_start_work(callback, state: FSMContext):
-    await callback.answer(notification="Меню закрыто. Задайте ваш вопрос!")
+    await callback.answer(notification="Задайте ваш вопрос")
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer("Я слушаю ваш вопрос. Чем могу помочь?")
+    await callback.message.answer("Я вас внимательно слушаю. Напишите, чем я могу вам помочь?")
 
 @router.message_callback(F.payload == "menu:support")
 async def menu_support(callback):
@@ -248,11 +248,11 @@ async def menu_support(callback):
     except Exception:
         pass
     support_text = (
-        "🆘 Техподдержка и полезные контакты\n\n"
-        "Технические проблемы с ботом:\n"
-        f"📧 {TECH_SUPPORT_EMAIL}\n\n"
-        "Вопросы общего характера:\n"
-        f"📞 {UOS_PHONE} (Управление общественных связей мэрии)"
+        "🆘 Мы всегда готовы прийти на помощь!\n\n"
+        "Если у вас возникли технические сложности с ботом:\n"
+        f"📧 Напишите нам: {TECH_SUPPORT_EMAIL}\n\n"
+        "Если у вас вопросы общего характера (о городских событиях, мероприятиях или мерах поддержки):\n"
+        f"📞 Позвоните в Управление общественных связей мэрии: {UOS_PHONE}"
     )
     await callback.message.answer(text=support_text, keyboard=get_main_menu())
 
@@ -273,19 +273,19 @@ async def menu_feedback(callback, state: FSMContext):
     for i in range(1, 6):
         builder.callback(text=f"{i} ⭐", payload=f"rate:{i}")
     builder.adjust(5)
-    await callback.message.answer("Оцените работу бота от 1 до 5:", keyboard=builder)
+    await callback.message.answer("Нам очень важно ваше мнение! Оцените, пожалуйста, работу бота от 1 до 5:", keyboard=builder)
 
 @router.message_callback(F.payload.startswith("rate:"))
 async def process_rating(callback, state: FSMContext):
     rating = callback.payload.split(":")[1]
     await state.update_data(rating=rating)
-    await callback.answer(notification=f"Вы поставили {rating}")
+    await callback.answer(notification=f"Спасибо за оценку {rating}")
     try:
         await callback.message.delete()
     except Exception:
         pass
     await state.set_state(Feedback.waiting_for_comment)
-    await callback.message.answer(f"Спасибо за оценку {rating}!\n\nНапишите ваш отзыв:")
+    await callback.message.answer(f"Большое спасибо за оценку {rating}!\n\nНапишите, пожалуйста, ваш отзыв или пожелание:")
 
 @router.message(Feedback.waiting_for_comment)
 async def process_feedback_comment(message, state: FSMContext):
@@ -298,12 +298,12 @@ async def process_feedback_comment(message, state: FSMContext):
     logger.info(f"ОБРАТНАЯ СВЯЗЬ: Оценка={rating} | Отзыв={comment} | MAX_ID={user_id}")
     await state.set_state(Registration.registered)
     await message.answer(
-        "🙏 Спасибо за ваш отзыв!",
+        "🙏 Сердечно благодарим вас за отзыв! Мы обязательно учтем его в нашей работе, чтобы стать еще лучше.",
         keyboard=get_main_menu()
     )
 
 # ==========================================
-# ОСНОВНОЙ ОБРАБОТЧИК (ИИ + ИСТОРИЯ)
+# ОСНОВНОЙ ОБРАБОТЧИК (ИИ + ИСТОРИЯ + ПЕЧАТАЕТ)
 # ==========================================
 
 @router.message(Registration.registered)
@@ -318,45 +318,48 @@ async def ai_handler(message):
 
     save_message(user_id, "user", user_text)
 
+    # Отправляем сообщение "Печатает..."
+    thinking_message = await message.answer("⏳ Секундочку, мне нужно немного подумать...")
+
     try:
-        prompt = (
-            "Ты — экспертный ИИ-ассистент «Активный город». "
-            "Помогай активистам ТОС и НКО Новосибирской области: "
-            "пиши посты, придумывай идеи для презентаций, помогай с грантами.\n\n"
-            f"Вопрос: {user_text}"
+        # Улучшенный, мягкий и дружелюбный промпт
+        prompt_with_kb = (
+            "Ты — очень вежливый, заботливый и дружелюбный ИИ-ассистент «Активный город». "
+            "Твои пользователи — активисты ТОС, представители НКО и люди старшего поколения. "
+            "Общайся с ними тепло, уважительно и простым языком.\n\n"
+            "ПРАВИЛА:\n"
+            "1. Используй информацию ТОЛЬКО из прикрепленного документа. Не выдумывай факты, не бери их из интернета. Если нужно, переформулируй текст из документа, чтобы он звучал проще и понятнее, но НЕ меняй суть.\n"
+            f"2. Если в документе нет ответа на вопрос, мягко ответь: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n\n"
+            f"Вопрос пользователя: {user_text}"
         )
         
-        if KNOWLEDGE_FILE_ID:
-            prompt_with_kb = (
-                "Ты — экспертный ИИ-ассистент «Активный город». "
-                "Отвечай ТОЛЬКО на основе прикрепленного документа. "
-                f"Если ответа нет, скажи: «Нет информации. Обратитесь в УОС: {UOS_PHONE}».\n\n"
-                f"Вопрос: {user_text}"
-            )
-            chat_request = Chat(
-                messages=[
-                    Messages(
-                        role=MessagesRole.USER,
-                        content=prompt_with_kb,
-                        attachments=[KNOWLEDGE_FILE_ID]
-                    )
-                ]
-            )
-            response = await giga.achat(chat_request)
-        else:
-            response = await giga.achat.create(prompt)
+        chat_request = Chat(
+            messages=[
+                Messages(
+                    role=MessagesRole.USER,
+                    content=prompt_with_kb,
+                    attachments=[KNOWLEDGE_FILE_ID] if KNOWLEDGE_FILE_ID else []
+                )
+            ]
+        )
+        response = await giga.achat(chat_request)
         
-        # ИСПРАВЛЕНО: Извлекаем текст из choices
         raw_answer = response.choices[0].message.content
-        
         clean_answer = clean_text(raw_answer)
         
-        disclaimer = f"\n\n---\n(Сгенерировано ИИ. Ошибки: {TECH_SUPPORT_EMAIL})"
+        # Мягкий и аккуратный дисклеймер
+        disclaimer = f"\n\n(Сгенерировано ИИ. Если что-то пошло не так, напишите нам: {TECH_SUPPORT_EMAIL})"
         answer = clean_answer + disclaimer
         
     except Exception as e:
         logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
-        answer = f"🛠 Техническая ошибка.\nДетали: {type(e).__name__}: {e}\n\nПишите: {TECH_SUPPORT_EMAIL}"
+        answer = f"🛠 Ой, кажется, у меня возникла небольшая техническая заминка. Пожалуйста, попробуйте чуть позже или напишите нам: {TECH_SUPPORT_EMAIL}"
+
+    # Удаляем сообщение "Печатает..." перед отправкой ответа
+    try:
+        await thinking_message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение 'Печатает': {e}")
 
     save_message(user_id, "bot", answer)
     await message.answer(text=answer)
@@ -430,7 +433,7 @@ async def show_user_history(message):
 
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
-    await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше.")
+    await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы мы могли начать.")
 
 @router.message()
 async def fallback_handler(message, state: FSMContext):
@@ -439,7 +442,7 @@ async def fallback_handler(message, state: FSMContext):
     if current_state is None:
         await start_handler(message, state)
     else:
-        await message.answer("Я вас не совсем понял. Нажмите /menu для выбора действия или /start для перезапуска.")
+        await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /menu для выбора действия или /start для перезапуска.")
 
 # ==========================================
 # ЗАПУСК
