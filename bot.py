@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 import logging
+import sqlite3
+import datetime
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
 from maxgram.fsm.context import FSMContext
@@ -25,23 +27,85 @@ giga = GigaChat(
     scope="GIGACHAT_API_PERS"
 )
 
-# --- Состояния ---
-class Registration(StatesGroup):
-    waiting_for_consent = State()
-    waiting_for_fio = State()
-    waiting_for_org = State()
-    registered = State()
+# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
+# В Bothost нужно добавить переменную ADMIN_IDS (например: 12345678,87654321)
+admin_ids_str = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS = []
+if admin_ids_str:
+    try:
+        # Разбиваем строку по запятой и превращаем в список чисел
+        ADMIN_IDS = [int(i.strip()) for i in admin_ids_str.split(",") if i.strip().isdigit()]
+        logger.info(f"✅ Загружены ID администраторов: {ADMIN_IDS}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
-class Feedback(StatesGroup):
-    waiting_for_rating = State()
-    waiting_for_comment = State()
-
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+KNOWLEDGE_FILE_ID = None
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
+TECH_SUPPORT_EMAIL = "support@iscso.ru"
+UOS_PHONE = "(383) 229-67-72"
 
+# --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
+DB_PATH = "/app/data/bot_history.db"
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            role TEXT,
+            text TEXT,
+            timestamp DATETIME
+        )
+    """)
+    conn.commit()
+    conn.close()
+    logger.info(f"✅ База данных инициализирована: {DB_PATH}")
+
+def save_message(user_id: int, role: str, text: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO messages (user_id, role, text, timestamp) VALUES (?, ?, ?, ?)",
+        (user_id, role, text, datetime.datetime.now())
+    )
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT user_id FROM messages")
+    users = [row[0] for row in cur.fetchall()]
+    conn.close()
+    return users
+
+def get_user_history(user_id: int, limit: int = 50):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT role, text, timestamp FROM messages WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (user_id, limit)
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+# --- УТИЛИТЫ ---
 def get_text(message) -> str:
     if hasattr(message, 'body') and hasattr(message.body, 'text'):
         return message.body.text or ""
     return ""
+
+def get_user_id(message):
+    if hasattr(message, 'sender') and hasattr(message.sender, 'user_id'):
+        return message.sender.user_id
+    elif hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
+        return message.from_user.id
+    return None
 
 def clean_text(text: str) -> str:
     if not text:
@@ -52,9 +116,31 @@ def get_main_menu():
     builder = InlineKeyboardBuilder()
     builder.callback(text="🚀 Начать работу", payload="menu:start_work")
     builder.callback(text="💬 Оставить обратную связь", payload="menu:feedback")
+    builder.callback(text="🆘 Техподдержка и контакты", payload="menu:support")
     builder.callback(text="🔒 Политика конфиденциальности", payload="menu:privacy")
     builder.adjust(1)
     return builder
+
+async def upload_knowledge_base():
+    global KNOWLEDGE_FILE_ID
+    try:
+        with open("knowledge_base.pdf", "rb") as f:
+            uploaded = await giga.aupload_file(file=f, purpose="general")
+            KNOWLEDGE_FILE_ID = uploaded.id
+            logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
+    except Exception as e:
+        logger.error(f"❌ Не удалось загрузить базу знаний: {e}")
+
+# --- СОСТОЯНИЯ (FSM) ---
+class Registration(StatesGroup):
+    waiting_for_consent = State()
+    waiting_for_fio = State()
+    waiting_for_org = State()
+    registered = State()
+
+class Feedback(StatesGroup):
+    waiting_for_rating = State()
+    waiting_for_comment = State()
 
 # ==========================================
 # СТАРТ И РЕГИСТРАЦИЯ
@@ -92,11 +178,7 @@ async def process_fio(message, state: FSMContext):
     text = get_text(message)
     if not text:
         return
-    max_user_id = None
-    if hasattr(message, 'sender') and hasattr(message.sender, 'user_id'):
-        max_user_id = message.sender.user_id
-    elif hasattr(message, 'from_user') and hasattr(message.from_user, 'id'):
-        max_user_id = message.from_user.id
+    max_user_id = get_user_id(message)
     await state.update_data(fio=text, max_user_id=max_user_id)
     await state.set_state(Registration.waiting_for_org)
     await message.answer(f"Спасибо, {text}!\n\nУкажите организацию (ТОС или НКО):")
@@ -137,10 +219,26 @@ async def menu_start_work(callback, state: FSMContext):
         pass
     await callback.message.answer("Я слушаю ваш вопрос. Чем могу помочь?")
 
+@router.message_callback(F.payload == "menu:support")
+async def menu_support(callback):
+    await callback.answer(notification="Загружаю контакты...")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    support_text = (
+        "🆘 Техподдержка и полезные контакты\n\n"
+        "Технические проблемы с ботом:\n"
+        f"📧 {TECH_SUPPORT_EMAIL}\n\n"
+        "Вопросы общего характера:\n"
+        f"📞 {UOS_PHONE} (Управление общественных связей мэрии)"
+    )
+    await callback.message.answer(text=support_text, keyboard=get_main_menu())
+
 @router.message_callback(F.payload == "menu:privacy")
 async def menu_privacy(callback):
     await callback.answer(notification="Ссылка на политику")
-    await callback.message.answer(f"🔒 Политика конфиденциальности и согласие на обработку данных:\n{CONSENT_URL}")
+    await callback.message.answer(f"🔒 Политика конфиденциальности:\n{CONSENT_URL}")
 
 @router.message_callback(F.payload == "menu:feedback")
 async def menu_feedback(callback, state: FSMContext):
@@ -154,7 +252,7 @@ async def menu_feedback(callback, state: FSMContext):
     for i in range(1, 6):
         builder.callback(text=f"{i} ⭐", payload=f"rate:{i}")
     builder.adjust(5)
-    await callback.message.answer("Оцените, пожалуйста, работу бота от 1 до 5:", keyboard=builder)
+    await callback.message.answer("Оцените работу бота от 1 до 5:", keyboard=builder)
 
 @router.message_callback(F.payload.startswith("rate:"))
 async def process_rating(callback, state: FSMContext):
@@ -166,7 +264,7 @@ async def process_rating(callback, state: FSMContext):
     except Exception:
         pass
     await state.set_state(Feedback.waiting_for_comment)
-    await callback.message.answer(f"Спасибо за оценку {rating}!\n\nНапишите, пожалуйста, ваш отзыв или пожелание:")
+    await callback.message.answer(f"Спасибо за оценку {rating}!\n\nНапишите ваш отзыв:")
 
 @router.message(Feedback.waiting_for_comment)
 async def process_feedback_comment(message, state: FSMContext):
@@ -179,12 +277,12 @@ async def process_feedback_comment(message, state: FSMContext):
     logger.info(f"ОБРАТНАЯ СВЯЗЬ: Оценка={rating} | Отзыв={comment} | MAX_ID={user_id}")
     await state.set_state(Registration.registered)
     await message.answer(
-        "🙏 Спасибо за ваш отзыв! Мы обязательно учтём его в работе.",
+        "🙏 Спасибо за ваш отзыв!",
         keyboard=get_main_menu()
     )
 
 # ==========================================
-# ОСНОВНОЙ ФУНКЦИОНАЛ (GigaChat)
+# ОСНОВНОЙ ОБРАБОТЧИК (С СОХРАНЕНИЕМ ИСТОРИИ)
 # ==========================================
 
 @router.message(Registration.registered)
@@ -192,37 +290,115 @@ async def ai_handler(message):
     user_text = get_text(message)
     if not user_text:
         return
+
+    user_id = get_user_id(message)
+    if not user_id:
+        return
+
+    # 1. Сохраняем вопрос
+    save_message(user_id, "user", user_text)
+
+    if not KNOWLEDGE_FILE_ID:
+        await message.answer(f"База знаний недоступна. Пишите: {TECH_SUPPORT_EMAIL}")
+        return
+
     try:
         prompt = (
             "Ты — экспертный ИИ-ассистент «Активный город». "
-            "Твоя целевая аудитория — активисты ТОС и НКО Новосибирской области.\n"
-            "Помогай писать посты для соцсетей, готовить презентации, придумывать идеи для картинок, "
-            "оформлять грантовые заявки и отвечать на вопросы по организации мероприятий.\n\n"
-            "ПРАВИЛО: Пиши структурированно. НЕ используй Markdown (звёздочки, решётки, подчёркивания).\n\n"
-            f"Запрос пользователя: {user_text}"
+            "Отвечай ТОЛЬКО на основе документа. "
+            f"Если ответа нет, скажи: «Нет информации. Обратитесь в УОС: {UOS_PHONE}».\n\n"
+            f"Вопрос: {user_text}"
         )
-        response = await giga.achat.create(prompt)
+        
+        response = await giga.achat.create(prompt, attachments=[KNOWLEDGE_FILE_ID])
         raw_answer = response.messages[0].content[0].text
         clean_answer = clean_text(raw_answer)
-        disclaimer = "\n\n---\n(Ответ сгенерирован с помощью технологий искусственного интеллекта и носит справочный характер)"
+        
+        disclaimer = f"\n\n---\n(Сгенерировано ИИ. Ошибки: {TECH_SUPPORT_EMAIL})"
         answer = clean_answer + disclaimer
+        
     except Exception as e:
-        logger.error(f"!!! ОШИБКА GIGACHAT: {type(e).__name__}: {e}", exc_info=True)
-        answer = f"🛠 РЕЖИМ ОТЛАДКИ\nТип ошибки: {type(e).__name__}\nТекст: {e}"
+        logger.error(f"!!! ОШИБКА: {e}", exc_info=True)
+        answer = f"🛠 Техническая ошибка. Пишите: {TECH_SUPPORT_EMAIL}"
+
+    # 2. Сохраняем ответ
+    save_message(user_id, "bot", answer)
+
+    # 3. Отправляем
     await message.answer(text=answer)
 
-@router.message(Registration.waiting_for_consent)
-async def block_until_consent(message):
-    await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше.")
+# ==========================================
+# АДМИН-ПАНЕЛЬ (ПРОВЕРКА ПО ПЕРЕМЕННОЙ ОКРУЖЕНИЯ)
+# ==========================================
 
-@router.message(F.text)
-async def fallback_handler(message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await start_handler(message, state)
+@router.message(Command("admin"))
+async def admin_panel(message):
+    user_id = get_user_id(message)
+    
+    # Проверка: есть ли ID пользователя в списке админов
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+
+    users = get_all_users()
+    if not users:
+        await message.answer("📭 История диалогов пока пуста.")
+        return
+
+    text = "👑 **Админ-панель**\n\n"
+    text += f"Всего пользователей: {len(users)}\n\n"
+    text += "Чтобы посмотреть историю, отправьте:\n"
+    text += "`/history ID_ПОЛЬЗОВАТЕЛЯ`\n\n"
+    text += "Доступные ID:\n"
+    text += ", ".join([f"`{u}`" for u in users[:20]])
+    
+    await message.answer(text=text)
+
+@router.message(Command("history"))
+async def show_user_history(message):
+    user_id = get_user_id(message)
+    
+    if user_id not in ADMIN_IDS:
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    parts = get_text(message).split()
+    if len(parts) < 2:
+        await message.answer("Использование: `/history ID_ПОЛЬЗОВАТЕЛЯ`")
+        return
+    
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("ID должен быть числом.")
+        return
+
+    history = get_user_history(target_id, limit=30)
+    if not history:
+        await message.answer(f"Для пользователя {target_id} история не найдена.")
+        return
+
+    text = f"📜 **История диалога с {target_id}** (последние 30 сообщений)\n\n"
+    for role, msg_text, ts in reversed(history):
+        time_str = ts.strftime("%d.%m %H:%M") if ts else ""
+        prefix = "👤" if role == "user" else "🤖"
+        short_text = msg_text[:100] + "..." if len(msg_text) > 100 else msg_text
+        text += f"[{time_str}] {prefix}: {short_text}\n\n"
+
+    if len(text) > 4000:
+        for i in range(0, len(text), 4000):
+            await message.answer(text=text[i:i+4000])
     else:
-        await message.answer("Я вас не совсем понял. Нажмите /start, чтобы обновить меню.")
+        await message.answer(text=text)
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 if __name__ == "__main__":
     print("Бот запущен...")
-    asyncio.run(dp.start_polling(bot))
+    async def main():
+        init_db()
+        await upload_knowledge_base()
+        await dp.start_polling(bot)
+    
+    asyncio.run(main())
