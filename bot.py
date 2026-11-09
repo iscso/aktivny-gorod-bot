@@ -164,6 +164,10 @@ class Feedback(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_for_file = State()
 
+# ==========================================
+# СТАРТ И РЕГИСТРАЦИЯ
+# ==========================================
+
 @router.bot_started()
 @router.message(Command("start"))
 async def start_handler(message, state: FSMContext):
@@ -215,6 +219,10 @@ async def process_org(message, state: FSMContext):
         "Теперь я в вашем распоряжении. Вы можете задать мне любой вопрос или воспользоваться меню.",
         keyboard=get_main_menu()
     )
+
+# ==========================================
+# МЕНЮ И ОБРАТНАЯ СВЯЗЬ
+# ==========================================
 
 @router.message(Command("menu"))
 async def menu_handler(message, state: FSMContext):
@@ -295,61 +303,9 @@ async def process_feedback_comment(message, state: FSMContext):
         keyboard=get_main_menu()
     )
 
-@router.message(Registration.registered)
-async def ai_handler(message):
-    user_text = get_text(message)
-    if not user_text:
-        return
-
-    user_id = get_user_id(message)
-    if not user_id:
-        return
-
-    save_message(user_id, "user", user_text)
-
-    thinking_message = await message.answer("⏳ Секундочку, мне нужно немного подумать...")
-
-    try:
-        prompt_with_kb = (
-            "Ты — очень вежливый, заботливый и дружелюбный ИИ-ассистент «Активный город». "
-            "Твоя целевая аудитория — активисты ТОС, представители НКО и люди старшего поколения. Общайся просто, тепло и уважительно.\n\n"
-            "Твои правила:\n"
-            "1. Если пользователь задает светский вопрос (например, 'Как дела?', 'Привет', 'Кто ты?'), вежливо ответь ему и предложи свою помощь по вопросам ТОС, НКО, грантам или отчетности.\n"
-            "2. Если пользователь задает вопрос по профилю (о мерах поддержки, грантах, отчетности и т.д.), найди ответ в прикрепленном документе. Переформулируй текст из документа проще, чтобы он был понятен, но НЕ меняй суть и факты.\n"
-            f"3. Если в документе НЕТ ответа на профильный вопрос, строго ответь фразой: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n"
-            "4. Не выдумывай факты, не бери информацию из интернета.\n\n"
-            f"Вопрос пользователя: {user_text}"
-        )
-        
-        chat_request = Chat(
-            messages=[
-                Messages(
-                    role=MessagesRole.USER,
-                    content=prompt_with_kb,
-                    attachments=[KNOWLEDGE_FILE_ID] if KNOWLEDGE_FILE_ID else []
-                )
-            ]
-        )
-        response = await giga.achat(chat_request)
-        
-        raw_answer = response.choices[0].message.content
-        clean_answer = clean_text(raw_answer)
-        
-        # Приписка без символов подчеркивания
-        disclaimer = f"\n\n(Ответ сгенерирован ИИ. При возникновении ошибок пишите: {TECH_SUPPORT_EMAIL})"
-        answer = clean_answer + disclaimer
-        
-    except Exception as e:
-        logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
-        answer = f"🛠 Ой, кажется, у меня возникла небольшая техническая заминка. Пожалуйста, попробуйте чуть позже или напишите нам: {TECH_SUPPORT_EMAIL}"
-
-    try:
-        await thinking_message.delete()
-    except Exception as e:
-        logger.warning(f"Не удалось удалить сообщение: {e}")
-
-    save_message(user_id, "bot", answer)
-    await message.answer(text=answer)
+# ==========================================
+# АДМИН-ПАНЕЛЬ (ВЫШЕ ОБРАБОТЧИКА ИИ!)
+# ==========================================
 
 @router.message(Command("admin"))
 async def admin_panel(message):
@@ -439,12 +395,9 @@ async def export_history(message):
         f.write(output.getvalue())
 
     try:
-        # В разных версиях maxgram метод отправки файла может называться по-разному.
-        # Пытаемся использовать встроенные возможности.
         with open(file_path, "rb") as f:
             await message.answer_document(document=f, filename="history.csv")
     except AttributeError:
-        # Если метода нет, пробуем отправить через bot
         try:
             with open(file_path, "rb") as f:
                 await bot.send_document(chat_id=message.chat.id, document=f, filename="history.csv")
@@ -528,6 +481,73 @@ async def process_admin_file(message, state: FSMContext):
     finally:
         await state.set_state(Registration.registered)
 
+# ==========================================
+# ОСНОВНОЙ ОБРАБОТЧИК ИИ (В САМОМ НИЗУ!)
+# ==========================================
+
+@router.message(Registration.registered)
+async def ai_handler(message):
+    user_text = get_text(message)
+    if not user_text:
+        return
+
+    # Защита от обработки команд как обычного текста
+    if user_text.startswith("/"):
+        return
+
+    user_id = get_user_id(message)
+    if not user_id:
+        return
+
+    save_message(user_id, "user", user_text)
+
+    thinking_message = await message.answer("⏳ Секундочку, мне нужно немного подумать...")
+
+    try:
+        prompt_with_kb = (
+            "Ты — очень вежливый, заботливый и дружелюбный ИИ-ассистент «Активный город». "
+            "Твоя целевая аудитория — активисты ТОС, представители НКО и люди старшего поколения. Общайся просто, тепло и уважительно.\n\n"
+            "Твои правила:\n"
+            "1. Если пользователь задает светский вопрос (например, 'Как дела?', 'Привет', 'Кто ты?'), вежливо ответь ему и предложи свою помощь по вопросам ТОС, НКО, грантам или отчетности.\n"
+            "2. Если пользователь задает вопрос по профилю (о мерах поддержки, грантах, отчетности и т.д.), найди ответ в прикрепленном документе. Переформулируй текст из документа проще, чтобы он был понятен, но НЕ меняй суть и факты.\n"
+            f"3. Если в документе НЕТ ответа на профильный вопрос, строго ответь фразой: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n"
+            "4. Не выдумывай факты, не бери информацию из интернета.\n\n"
+            f"Вопрос пользователя: {user_text}"
+        )
+        
+        chat_request = Chat(
+            messages=[
+                Messages(
+                    role=MessagesRole.USER,
+                    content=prompt_with_kb,
+                    attachments=[KNOWLEDGE_FILE_ID] if KNOWLEDGE_FILE_ID else []
+                )
+            ]
+        )
+        response = await giga.achat(chat_request)
+        
+        raw_answer = response.choices[0].message.content
+        clean_answer = clean_text(raw_answer)
+        
+        disclaimer = f"\n\n(Ответ сгенерирован ИИ. При возникновении ошибок пишите: {TECH_SUPPORT_EMAIL})"
+        answer = clean_answer + disclaimer
+        
+    except Exception as e:
+        logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
+        answer = f"🛠 Ой, кажется, у меня возникла небольшая техническая заминка. Пожалуйста, попробуйте чуть позже или напишите нам: {TECH_SUPPORT_EMAIL}"
+
+    try:
+        await thinking_message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение: {e}")
+
+    save_message(user_id, "bot", answer)
+    await message.answer(text=answer)
+
+# ==========================================
+# БЛОКИРОВКИ И FALLBACK
+# ==========================================
+
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы мы могли начать.")
@@ -541,6 +561,9 @@ async def fallback_handler(message, state: FSMContext):
     else:
         await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /menu для выбора действия или /start для перезапуска.")
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 if __name__ == "__main__":
     print("Бот запущен...")
     async def main():
