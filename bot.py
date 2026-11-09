@@ -108,6 +108,21 @@ def get_user_id(message):
         return message.from_user.id
     return None
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ID ЧАТА ---
+def get_chat_id(message):
+    """Пытается найти ID чата в разных полях структуры сообщения MAX."""
+    if hasattr(message, 'chat') and hasattr(message.chat, 'id'):
+        return message.chat.id
+    if hasattr(message, 'recipient'):
+        if hasattr(message.recipient, 'chat_id'):
+            return message.recipient.chat_id
+        if hasattr(message.recipient, 'user_id'):
+            return message.recipient.user_id
+    if hasattr(message, 'dialog_id'):
+        return message.dialog_id
+    # Если ничего не нашли, возвращаем ID пользователя (для личных диалогов)
+    return get_user_id(message)
+
 def clean_text(text: str) -> str:
     if not text:
         return text
@@ -153,15 +168,11 @@ async def upload_knowledge_base():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
-# ==========================================
-# ОТПРАВКА ДОКУМЕНТОВ ЧЕРЕЗ ПРЯМОЙ API MAX
-# ==========================================
-
 async def send_document_via_max_api(chat_id: int, file_path: str, filename: str, caption: str = None) -> bool:
     headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             async with session.post(
                 f"{MAX_API_BASE}/uploads",
                 headers=headers,
@@ -217,10 +228,6 @@ async def send_document_via_max_api(chat_id: int, file_path: str, filename: str,
         logger.error(f"Исключение при отправке документа: {e}", exc_info=True)
         return False
 
-# ==========================================
-# СОСТОЯНИЯ (FSM)
-# ==========================================
-
 class Registration(StatesGroup):
     waiting_for_consent = State()
     waiting_for_fio = State()
@@ -233,10 +240,6 @@ class Feedback(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_for_file = State()
-
-# ==========================================
-# СТАРТ И РЕГИСТРАЦИЯ
-# ==========================================
 
 @router.bot_started()
 @router.message(Command("start"))
@@ -369,10 +372,6 @@ async def process_feedback_comment(message, state: FSMContext):
         keyboard=get_main_menu()
     )
 
-# ==========================================
-# АДМИН-ПАНЕЛЬ
-# ==========================================
-
 @router.message(Command("admin"))
 async def admin_panel(message):
     user_id = get_user_id(message)
@@ -460,7 +459,8 @@ async def export_history(message):
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
-    chat_id = message.chat.id if hasattr(message, 'chat') and hasattr(message.chat, 'id') else None
+    # Используем универсальную функцию получения chat_id
+    chat_id = get_chat_id(message)
     if not chat_id:
         await message.answer("Не удалось определить ID чата для отправки файла.")
         return
@@ -490,7 +490,6 @@ async def process_admin_file(message, state: FSMContext):
     if user_id not in ADMIN_IDS:
         return
 
-    # Ищем вложение типа "file" в массиве attachments
     attachments = getattr(message.body, 'attachments', None) or []
     file_attachment = None
 
@@ -526,7 +525,7 @@ async def process_admin_file(message, state: FSMContext):
     headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
                     content = await resp.read()
@@ -562,10 +561,6 @@ async def process_admin_file(message, state: FSMContext):
     
     finally:
         await state.set_state(Registration.registered)
-
-# ==========================================
-# ОСНОВНОЙ ОБРАБОТЧИК ИИ
-# ==========================================
 
 @router.message(Registration.registered)
 async def ai_handler(message):
@@ -625,10 +620,6 @@ async def ai_handler(message):
     save_message(user_id, "bot", answer)
     await message.answer(text=answer)
 
-# ==========================================
-# БЛОКИРОВКИ И FALLBACK
-# ==========================================
-
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы мы могли начать.")
@@ -642,9 +633,6 @@ async def fallback_handler(message, state: FSMContext):
     else:
         await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /menu для выбора действия или /start для перезапуска.")
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 if __name__ == "__main__":
     print("Бот запущен...")
     async def main():
