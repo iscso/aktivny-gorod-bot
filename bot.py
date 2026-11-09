@@ -24,7 +24,6 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
-# --- Инициализация GigaChat ---
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -32,7 +31,6 @@ giga = GigaChat(
     scope="GIGACHAT_API_PERS"
 )
 
-# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ---
 admin_ids_str = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = []
 if admin_ids_str:
@@ -42,14 +40,12 @@ if admin_ids_str:
     except Exception as e:
         logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
-# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 KNOWLEDGE_FILE_ID = None
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
 KNOWLEDGE_FILE_PATH = "knowledge_base.pdf"
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
 DB_PATH = "/app/data/bot_history.db"
 
 def init_db():
@@ -98,7 +94,6 @@ def get_user_history(user_id: int, limit: int = 50):
     conn.close()
     return rows
 
-# --- УТИЛИТЫ ---
 def get_text(message) -> str:
     if hasattr(message, 'body') and hasattr(message.body, 'text'):
         return message.body.text or ""
@@ -156,7 +151,6 @@ async def upload_knowledge_base():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
-# --- СОСТОЯНИЯ (FSM) ---
 class Registration(StatesGroup):
     waiting_for_consent = State()
     waiting_for_fio = State()
@@ -169,10 +163,6 @@ class Feedback(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_for_file = State()
-
-# ==========================================
-# СТАРТ И РЕГИСТРАЦИЯ
-# ==========================================
 
 @router.bot_started()
 @router.message(Command("start"))
@@ -225,10 +215,6 @@ async def process_org(message, state: FSMContext):
         "Теперь я в вашем распоряжении. Вы можете задать мне любой вопрос или воспользоваться меню.",
         keyboard=get_main_menu()
     )
-
-# ==========================================
-# МЕНЮ И ОБРАТНАЯ СВЯЗЬ
-# ==========================================
 
 @router.message(Command("menu"))
 async def menu_handler(message, state: FSMContext):
@@ -309,10 +295,6 @@ async def process_feedback_comment(message, state: FSMContext):
         keyboard=get_main_menu()
     )
 
-# ==========================================
-# ОСНОВНОЙ ОБРАБОТЧИК (ИИ + ИСТОРИЯ + ПЕЧАТАЕТ)
-# ==========================================
-
 @router.message(Registration.registered)
 async def ai_handler(message):
     user_text = get_text(message)
@@ -325,17 +307,17 @@ async def ai_handler(message):
 
     save_message(user_id, "user", user_text)
 
-    # Отправляем сообщение "Печатает..."
     thinking_message = await message.answer("⏳ Секундочку, мне нужно немного подумать...")
 
     try:
         prompt_with_kb = (
             "Ты — очень вежливый, заботливый и дружелюбный ИИ-ассистент «Активный город». "
-            "Твои пользователи — активисты ТОС, представители НКО и люди старшего поколения. "
-            "Общайся с ними тепло, уважительно и простым языком.\n\n"
-            "ПРАВИЛА:\n"
-            "1. Используй информацию ТОЛЬКО из прикрепленного документа. Не выдумывай факты, не бери их из интернета. Если нужно, переформулируй текст из документа, чтобы он звучал проще и понятнее, но НЕ меняй суть.\n"
-            f"2. Если в документе нет ответа на вопрос, мягко ответь: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n\n"
+            "Твоя целевая аудитория — активисты ТОС, представители НКО и люди старшего поколения. Общайся просто, тепло и уважительно.\n\n"
+            "Твои правила:\n"
+            "1. Если пользователь задает светский вопрос (например, 'Как дела?', 'Привет', 'Кто ты?'), вежливо ответь ему и предложи свою помощь по вопросам ТОС, НКО, грантам или отчетности.\n"
+            "2. Если пользователь задает вопрос по профилю (о мерах поддержки, грантах, отчетности и т.д.), найди ответ в прикрепленном документе. Переформулируй текст из документа проще, чтобы он был понятен, но НЕ меняй суть и факты.\n"
+            f"3. Если в документе НЕТ ответа на профильный вопрос, строго ответь фразой: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n"
+            "4. Не выдумывай факты, не бери информацию из интернета.\n\n"
             f"Вопрос пользователя: {user_text}"
         )
         
@@ -353,15 +335,14 @@ async def ai_handler(message):
         raw_answer = response.choices[0].message.content
         clean_answer = clean_text(raw_answer)
         
-        # Косой шрифт для приписки (нижние подчеркивания в Markdown)
-        disclaimer = f"\n\n_Ответ сгенерирован ИИ. При возникновении ошибок пишите: {TECH_SUPPORT_EMAIL}_"
+        # Приписка без символов подчеркивания
+        disclaimer = f"\n\n(Ответ сгенерирован ИИ. При возникновении ошибок пишите: {TECH_SUPPORT_EMAIL})"
         answer = clean_answer + disclaimer
         
     except Exception as e:
         logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
         answer = f"🛠 Ой, кажется, у меня возникла небольшая техническая заминка. Пожалуйста, попробуйте чуть позже или напишите нам: {TECH_SUPPORT_EMAIL}"
 
-    # Удаляем сообщение "Печатает..."
     try:
         await thinking_message.delete()
     except Exception as e:
@@ -369,10 +350,6 @@ async def ai_handler(message):
 
     save_message(user_id, "bot", answer)
     await message.answer(text=answer)
-
-# ==========================================
-# АДМИН-ПАНЕЛЬ (ИСТОРИЯ + ЗАГРУЗКА ФАЙЛОВ)
-# ==========================================
 
 @router.message(Command("admin"))
 async def admin_panel(message):
@@ -387,7 +364,7 @@ async def admin_panel(message):
         await message.answer("📭 История диалогов пока пуста.")
         return
 
-    text = "👑 *Админ-панель*\n\n"
+    text = "👑 Админ-панель\n\n"
     text += f"Всего пользователей: {len(users)}\n\n"
     text += "Доступные команды:\n"
     text += "/history ID_ПОЛЬЗОВАТЕЛЯ — посмотреть историю\n"
@@ -422,7 +399,7 @@ async def show_user_history(message):
         await message.answer(f"Для пользователя {target_id} история не найдена.")
         return
 
-    text = f"📜 *История диалога с {target_id}* (последние 30 сообщений)\n\n"
+    text = f"📜 История диалога с {target_id} (последние 30 сообщений)\n\n"
     for role, msg_text, ts in reversed(history):
         time_str = ts.strftime("%d.%m %H:%M") if ts else ""
         prefix = "👤" if role == "user" else "🤖"
@@ -451,26 +428,32 @@ async def export_history(message):
         await message.answer("История пуста.")
         return
 
-    # Создаем CSV файл в памяти
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';', quoting=csv.QUOTE_MINIMAL)
     writer.writerow(['User ID', 'Role', 'Text', 'Timestamp'])
     for row in rows:
         writer.writerow(row)
 
-    # Сохраняем во временный файл и отправляем
     file_path = "exported_history.csv"
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
     try:
-        # Отправка документа (синтаксис может отличаться в зависимости от версии maxgram)
-        # Если maxgram поддерживает answer_document:
-        await message.answer_document(document=open(file_path, "rb"), filename="history.csv")
+        # В разных версиях maxgram метод отправки файла может называться по-разному.
+        # Пытаемся использовать встроенные возможности.
+        with open(file_path, "rb") as f:
+            await message.answer_document(document=f, filename="history.csv")
+    except AttributeError:
+        # Если метода нет, пробуем отправить через bot
+        try:
+            with open(file_path, "rb") as f:
+                await bot.send_document(chat_id=message.chat.id, document=f, filename="history.csv")
+        except Exception as e:
+            logger.error(f"Ошибка отправки файла: {e}")
+            await message.answer("Файл сформирован, но отправить его не удалось (функция не поддерживается библиотекой).")
     except Exception as e:
         logger.error(f"Ошибка отправки файла: {e}")
-        # Если отправка файла не поддерживается, выводим текстом (если влезет)
-        await message.answer("Не удалось отправить файл. Попробуйте позже.")
+        await message.answer("Ошибка при отправке файла.")
 
 @router.message(Command("upload"))
 async def admin_upload_start(message, state: FSMContext):
@@ -487,21 +470,17 @@ async def process_admin_file(message, state: FSMContext):
     if user_id not in ADMIN_IDS:
         return
 
-    # Проверяем наличие вложения
     if not hasattr(message.body, 'attachment') or not message.body.attachment:
         await message.answer("Вы не прикрепили файл. Пожалуйста, отправьте документ в формате PDF.")
         return
 
     try:
         attachment = message.body.attachment
-        # В MAX структура файла может быть внутри payload или body
         file_info = attachment.payload if hasattr(attachment, 'payload') else attachment
         file_id = file_info.file_id or file_info.id if hasattr(file_info, 'file_id') else getattr(file_info, 'id', None)
         
-        if not file_id:
-            # Попытка достать ID из вложенного объекта
-            if hasattr(file_info, 'file') and hasattr(file_info.file, 'id'):
-                file_id = file_info.file.id
+        if not file_id and hasattr(file_info, 'file') and hasattr(file_info.file, 'id'):
+            file_id = file_info.file.id
                 
         if not file_id:
             await message.answer("Не удалось распознать ID файла.")
@@ -509,7 +488,6 @@ async def process_admin_file(message, state: FSMContext):
 
         await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
 
-        # Скачиваем файл через API MAX
         url = f"https://platform-api2.max.ru/files/{file_id}"
         headers = {"Authorization": f"Bearer {os.environ.get('MAX_BOT_TOKEN')}"}
         
@@ -523,7 +501,6 @@ async def process_admin_file(message, state: FSMContext):
                     await message.answer(f"Ошибка скачивания файла (код {resp.status}).")
                     return
 
-        # Теперь загружаем новый файл в GigaChat
         global KNOWLEDGE_FILE_ID
         with open(KNOWLEDGE_FILE_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
@@ -549,12 +526,7 @@ async def process_admin_file(message, state: FSMContext):
         await message.answer(f"🛠 Произошла ошибка при обработке файла: {e}")
     
     finally:
-        # Выходим из режима ожидания файла
         await state.set_state(Registration.registered)
-
-# ==========================================
-# БЛОКИРОВКИ И FALLBACK
-# ==========================================
 
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
@@ -569,9 +541,6 @@ async def fallback_handler(message, state: FSMContext):
     else:
         await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /menu для выбора действия или /start для перезапуска.")
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
 if __name__ == "__main__":
     print("Бот запущен...")
     async def main():
