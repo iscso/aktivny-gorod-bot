@@ -126,7 +126,7 @@ async def upload_knowledge_base():
         with open("knowledge_base.pdf", "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
-            # Универсальный поиск ID файла для разных версий SDK
+            # 1. Пробуем стандартные имена полей
             file_id = (
                 getattr(uploaded, 'id', None) or
                 getattr(uploaded, 'id_', None) or
@@ -134,11 +134,22 @@ async def upload_knowledge_base():
                 getattr(uploaded, 'uuid', None)
             )
             
+            # 2. Если не нашли — смотрим в __dict__ или model_dump (Pydantic)
+            if not file_id:
+                if hasattr(uploaded, '__dict__'):
+                    file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
+                elif hasattr(uploaded, 'model_dump'):
+                    dump = uploaded.model_dump()
+                    file_id = dump.get('id') or dump.get('id_')
+
             if file_id:
                 KNOWLEDGE_FILE_ID = file_id
                 logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
             else:
-                logger.warning(f"⚠️ Файл загружен, но ID не найден. Атрибуты: {dir(uploaded)}")
+                # 3. Диагностика: выводим все атрибуты, чтобы найти нужное имя
+                logger.warning(f"⚠️ ID файла не найден. Доступные атрибуты: {dir(uploaded)}")
+                if hasattr(uploaded, '__dict__'):
+                    logger.warning(f"Содержимое __dict__: {uploaded.__dict__}")
                 
     except FileNotFoundError:
         logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать в обычном режиме.")
