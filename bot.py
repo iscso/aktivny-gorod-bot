@@ -45,7 +45,6 @@ TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
-# В Bothost файл сохраняется в /app/data/
 DB_PATH = "/app/data/bot_history.db"
 
 def init_db():
@@ -124,13 +123,25 @@ def get_main_menu():
 async def upload_knowledge_base():
     global KNOWLEDGE_FILE_ID
     try:
-        # Пытаемся открыть файл. Если его нет, вызовется FileNotFoundError
         with open("knowledge_base.pdf", "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
-            KNOWLEDGE_FILE_ID = uploaded.id
-            logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
+            
+            # Универсальный поиск ID файла для разных версий SDK
+            file_id = (
+                getattr(uploaded, 'id', None) or
+                getattr(uploaded, 'id_', None) or
+                getattr(uploaded, 'file_id', None) or
+                getattr(uploaded, 'uuid', None)
+            )
+            
+            if file_id:
+                KNOWLEDGE_FILE_ID = file_id
+                logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
+            else:
+                logger.warning(f"⚠️ Файл загружен, но ID не найден. Атрибуты: {dir(uploaded)}")
+                
     except FileNotFoundError:
-        logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать без базы знаний (в обычном режиме).")
+        logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать в обычном режиме.")
     except Exception as e:
         logger.error(f"❌ Не удалось загрузить базу знаний: {e}")
 
@@ -309,7 +320,7 @@ async def ai_handler(message):
             f"Вопрос: {user_text}"
         )
         
-        # Если база знаний загружена — используем её, иначе — обычный запрос
+        # Если база знаний загружена — используем её
         if KNOWLEDGE_FILE_ID:
             prompt = (
                 "Ты — экспертный ИИ-ассистент «Активный город». "
@@ -394,7 +405,6 @@ async def show_user_history(message):
         short_text = msg_text[:150] + "..." if len(msg_text) > 150 else msg_text
         text += f"[{time_str}] {prefix}: {short_text}\n\n"
 
-    # Отправляем частями, если текст слишком длинный
     if len(text) > 4000:
         for i in range(0, len(text), 4000):
             await message.answer(text=text[i:i+4000])
