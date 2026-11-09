@@ -126,7 +126,6 @@ async def upload_knowledge_base():
         with open("knowledge_base.pdf", "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
-            # 1. Пробуем стандартные имена полей
             file_id = (
                 getattr(uploaded, 'id', None) or
                 getattr(uploaded, 'id_', None) or
@@ -134,7 +133,6 @@ async def upload_knowledge_base():
                 getattr(uploaded, 'uuid', None)
             )
             
-            # 2. Если не нашли — смотрим в __dict__ или model_dump (Pydantic)
             if not file_id:
                 if hasattr(uploaded, '__dict__'):
                     file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
@@ -146,10 +144,7 @@ async def upload_knowledge_base():
                 KNOWLEDGE_FILE_ID = file_id
                 logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
             else:
-                # 3. Диагностика: выводим все атрибуты, чтобы найти нужное имя
                 logger.warning(f"⚠️ ID файла не найден. Доступные атрибуты: {dir(uploaded)}")
-                if hasattr(uploaded, '__dict__'):
-                    logger.warning(f"Содержимое __dict__: {uploaded.__dict__}")
                 
     except FileNotFoundError:
         logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать в обычном режиме.")
@@ -320,7 +315,6 @@ async def ai_handler(message):
     if not user_id:
         return
 
-    # 1. Сохраняем вопрос
     save_message(user_id, "user", user_text)
 
     try:
@@ -331,7 +325,6 @@ async def ai_handler(message):
             f"Вопрос: {user_text}"
         )
         
-        # Если база знаний загружена — используем её
         if KNOWLEDGE_FILE_ID:
             prompt = (
                 "Ты — экспертный ИИ-ассистент «Активный город». "
@@ -353,10 +346,7 @@ async def ai_handler(message):
         logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
         answer = f"🛠 Техническая ошибка. Пишите: {TECH_SUPPORT_EMAIL}"
 
-    # 2. Сохраняем ответ
     save_message(user_id, "bot", answer)
-
-    # 3. Отправляем
     await message.answer(text=answer)
 
 # ==========================================
@@ -430,9 +420,10 @@ async def show_user_history(message):
 async def block_until_consent(message):
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше.")
 
-@router.message(F.text)
+@router.message()
 async def fallback_handler(message, state: FSMContext):
     current_state = await state.get_state()
+    logger.info(f">>> FALLBACK: состояние={current_state}")
     if current_state is None:
         await start_handler(message, state)
     else:
