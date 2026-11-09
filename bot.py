@@ -4,6 +4,9 @@ import re
 import logging
 import sqlite3
 import datetime
+import csv
+import io
+import aiohttp
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
 from maxgram.fsm.context import FSMContext
@@ -21,6 +24,7 @@ dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
 
+# --- Инициализация GigaChat ---
 giga = GigaChat(
     credentials=os.environ.get("GIGACHAT_CREDENTIALS"),
     verify_ssl_certs=False,
@@ -43,6 +47,7 @@ KNOWLEDGE_FILE_ID = None
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
+KNOWLEDGE_FILE_PATH = "knowledge_base.pdf"
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ (SQLite) ---
 DB_PATH = "/app/data/bot_history.db"
@@ -109,11 +114,8 @@ def get_user_id(message):
 def clean_text(text: str) -> str:
     if not text:
         return text
-    # Удаляем звездочки, решетки, подчеркивания
     text = re.sub(r'[*#_]', '', text)
-    # Заменяем маркеры списков (дефисы) на аккуратные точки
     text = re.sub(r'^\s*-\s+', '• ', text, flags=re.MULTILINE)
-    # Убираем разделители --- 
     text = text.replace('---', '')
     return text.strip()
 
@@ -129,7 +131,11 @@ def get_main_menu():
 async def upload_knowledge_base():
     global KNOWLEDGE_FILE_ID
     try:
-        with open("knowledge_base.pdf", "rb") as f:
+        if not os.path.exists(KNOWLEDGE_FILE_PATH):
+            logger.warning(f"⚠️ Файл {KNOWLEDGE_FILE_PATH} не найден.")
+            return
+
+        with open(KNOWLEDGE_FILE_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
             file_id = (
@@ -147,10 +153,8 @@ async def upload_knowledge_base():
             else:
                 logger.warning(f"⚠️ ID файла не найден.")
                 
-    except FileNotFoundError:
-        logger.warning("⚠️ Файл knowledge_base.pdf не найден. Бот будет работать в обычном режиме.")
     except Exception as e:
-        logger.error(f"❌ Не удалось загрузить базу знаний: {e}")
+        logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
 # --- СОСТОЯНИЯ (FSM) ---
 class Registration(StatesGroup):
@@ -162,6 +166,9 @@ class Registration(StatesGroup):
 class Feedback(StatesGroup):
     waiting_for_rating = State()
     waiting_for_comment = State()
+
+class AdminStates(StatesGroup):
+    waiting_for_file = State()
 
 # ==========================================
 # СТАРТ И РЕГИСТРАЦИЯ
@@ -322,7 +329,6 @@ async def ai_handler(message):
     thinking_message = await message.answer("⏳ Секундочку, мне нужно немного подумать...")
 
     try:
-        # Улучшенный, мягкий и дружелюбный промпт
         prompt_with_kb = (
             "Ты — очень вежливый, заботливый и дружелюбный ИИ-ассистент «Активный город». "
             "Твои пользователи — активисты ТОС, представители НКО и люди старшего поколения. "
@@ -347,25 +353,25 @@ async def ai_handler(message):
         raw_answer = response.choices[0].message.content
         clean_answer = clean_text(raw_answer)
         
-        # Мягкий и аккуратный дисклеймер
-        disclaimer = f"\n\n(Сгенерировано ИИ. Если что-то пошло не так, напишите нам: {TECH_SUPPORT_EMAIL})"
+        # Косой шрифт для приписки (нижние подчеркивания в Markdown)
+        disclaimer = f"\n\n_Ответ сгенерирован ИИ. При возникновении ошибок пишите: {TECH_SUPPORT_EMAIL}_"
         answer = clean_answer + disclaimer
         
     except Exception as e:
         logger.error(f"!!! ОШИБКА GIGACHAT: {e}", exc_info=True)
         answer = f"🛠 Ой, кажется, у меня возникла небольшая техническая заминка. Пожалуйста, попробуйте чуть позже или напишите нам: {TECH_SUPPORT_EMAIL}"
 
-    # Удаляем сообщение "Печатает..." перед отправкой ответа
+    # Удаляем сообщение "Печатает..."
     try:
         await thinking_message.delete()
     except Exception as e:
-        logger.warning(f"Не удалось удалить сообщение 'Печатает': {e}")
+        logger.warning(f"Не удалось удалить сообщение: {e}")
 
     save_message(user_id, "bot", answer)
     await message.answer(text=answer)
 
 # ==========================================
-# АДМИН-ПАНЕЛЬ (ИСТОРИЯ)
+# АДМИН-ПАНЕЛЬ (ИСТОРИЯ + ЗАГРУЗКА ФАЙЛОВ)
 # ==========================================
 
 @router.message(Command("admin"))
@@ -381,10 +387,12 @@ async def admin_panel(message):
         await message.answer("📭 История диалогов пока пуста.")
         return
 
-    text = "👑 Админ-панель\n\n"
+    text = "👑 *Админ-панель*\n\n"
     text += f"Всего пользователей: {len(users)}\n\n"
-    text += "Чтобы посмотреть историю, отправьте:\n"
-    text += "/history ID_ПОЛЬЗОВАТЕЛЯ\n\n"
+    text += "Доступные команды:\n"
+    text += "/history ID_ПОЛЬЗОВАТЕЛЯ — посмотреть историю\n"
+    text += "/upload — загрузить новый PDF с базой знаний\n"
+    text += "/export — выгрузить всю историю в CSV файл\n\n"
     text += "Доступные ID:\n"
     text += ", ".join([f"{u}" for u in users[:20]])
     
@@ -414,7 +422,7 @@ async def show_user_history(message):
         await message.answer(f"Для пользователя {target_id} история не найдена.")
         return
 
-    text = f"📜 История диалога с {target_id} (последние 30 сообщений)\n\n"
+    text = f"📜 *История диалога с {target_id}* (последние 30 сообщений)\n\n"
     for role, msg_text, ts in reversed(history):
         time_str = ts.strftime("%d.%m %H:%M") if ts else ""
         prefix = "👤" if role == "user" else "🤖"
@@ -426,6 +434,123 @@ async def show_user_history(message):
             await message.answer(text=text[i:i+4000])
     else:
         await message.answer(text=text)
+
+@router.message(Command("export"))
+async def export_history(message):
+    user_id = get_user_id(message)
+    if user_id not in ADMIN_IDS:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, role, text, timestamp FROM messages ORDER BY timestamp")
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await message.answer("История пуста.")
+        return
+
+    # Создаем CSV файл в памяти
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=';', quoting=csv.QUOTE_MINIMAL)
+    writer.writerow(['User ID', 'Role', 'Text', 'Timestamp'])
+    for row in rows:
+        writer.writerow(row)
+
+    # Сохраняем во временный файл и отправляем
+    file_path = "exported_history.csv"
+    with open(file_path, "w", encoding="utf-8-sig") as f:
+        f.write(output.getvalue())
+
+    try:
+        # Отправка документа (синтаксис может отличаться в зависимости от версии maxgram)
+        # Если maxgram поддерживает answer_document:
+        await message.answer_document(document=open(file_path, "rb"), filename="history.csv")
+    except Exception as e:
+        logger.error(f"Ошибка отправки файла: {e}")
+        # Если отправка файла не поддерживается, выводим текстом (если влезет)
+        await message.answer("Не удалось отправить файл. Попробуйте позже.")
+
+@router.message(Command("upload"))
+async def admin_upload_start(message, state: FSMContext):
+    user_id = get_user_id(message)
+    if user_id not in ADMIN_IDS:
+        return
+    
+    await state.set_state(AdminStates.waiting_for_file)
+    await message.answer("📎 Пожалуйста, отправьте мне PDF-файл с обновленной базой знаний. Я его скачаю и обновлю свой «мозг».")
+
+@router.message(AdminStates.waiting_for_file)
+async def process_admin_file(message, state: FSMContext):
+    user_id = get_user_id(message)
+    if user_id not in ADMIN_IDS:
+        return
+
+    # Проверяем наличие вложения
+    if not hasattr(message.body, 'attachment') or not message.body.attachment:
+        await message.answer("Вы не прикрепили файл. Пожалуйста, отправьте документ в формате PDF.")
+        return
+
+    try:
+        attachment = message.body.attachment
+        # В MAX структура файла может быть внутри payload или body
+        file_info = attachment.payload if hasattr(attachment, 'payload') else attachment
+        file_id = file_info.file_id or file_info.id if hasattr(file_info, 'file_id') else getattr(file_info, 'id', None)
+        
+        if not file_id:
+            # Попытка достать ID из вложенного объекта
+            if hasattr(file_info, 'file') and hasattr(file_info.file, 'id'):
+                file_id = file_info.file.id
+                
+        if not file_id:
+            await message.answer("Не удалось распознать ID файла.")
+            return
+
+        await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
+
+        # Скачиваем файл через API MAX
+        url = f"https://platform-api2.max.ru/files/{file_id}"
+        headers = {"Authorization": f"Bearer {os.environ.get('MAX_BOT_TOKEN')}"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    with open(KNOWLEDGE_FILE_PATH, "wb") as f:
+                        f.write(content)
+                else:
+                    await message.answer(f"Ошибка скачивания файла (код {resp.status}).")
+                    return
+
+        # Теперь загружаем новый файл в GigaChat
+        global KNOWLEDGE_FILE_ID
+        with open(KNOWLEDGE_FILE_PATH, "rb") as f:
+            uploaded = await giga.aupload_file(file=f, purpose="general")
+            
+            new_file_id = (
+                getattr(uploaded, 'id', None) or
+                getattr(uploaded, 'id_', None) or
+                getattr(uploaded, 'file_id', None) or
+                getattr(uploaded, 'uuid', None)
+            )
+            if not new_file_id and hasattr(uploaded, '__dict__'):
+                new_file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
+
+            if new_file_id:
+                KNOWLEDGE_FILE_ID = new_file_id
+                await message.answer("✅ Успешно! Новый документ загружен, и я уже начал использовать его для ответов на вопросы.")
+                logger.info(f"Админ обновил базу знаний. Новый FILE_ID: {KNOWLEDGE_FILE_ID}")
+            else:
+                await message.answer("⚠️ Файл скачан, но не удалось получить его ID для GigaChat.")
+                
+    except Exception as e:
+        logger.error(f"Ошибка в админ-загрузке файла: {e}", exc_info=True)
+        await message.answer(f"🛠 Произошла ошибка при обработке файла: {e}")
+    
+    finally:
+        # Выходим из режима ожидания файла
+        await state.set_state(Registration.registered)
 
 # ==========================================
 # БЛОКИРОВКИ И FALLBACK
