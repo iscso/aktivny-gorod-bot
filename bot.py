@@ -45,6 +45,8 @@ CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
 KNOWLEDGE_FILE_PATH = "knowledge_base.pdf"
+MAX_API_BASE = "https://platform-api2.max.ru"
+MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN")
 
 DB_PATH = "/app/data/bot_history.db"
 
@@ -151,6 +153,74 @@ async def upload_knowledge_base():
     except Exception as e:
         logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
 
+# ==========================================
+# ОТПРАВКА ДОКУМЕНТОВ ЧЕРЕЗ ПРЯМОЙ API MAX
+# ==========================================
+
+async def send_document_via_max_api(chat_id: int, file_path: str, filename: str, caption: str = None) -> bool:
+    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{MAX_API_BASE}/uploads",
+                headers=headers,
+                json={"type": "file"}
+            ) as resp:
+                if resp.status != 200:
+                    logger.error(f"Ошибка получения URL для загрузки: {resp.status} {await resp.text()}")
+                    return False
+                data = await resp.json()
+                upload_url = data.get("url")
+                if not upload_url:
+                    logger.error("В ответе API нет URL для загрузки")
+                    return False
+
+            with open(file_path, "rb") as f:
+                form_data = aiohttp.FormData()
+                form_data.add_field("file", f, filename=filename)
+                async with session.post(upload_url, data=form_data) as upload_resp:
+                    if upload_resp.status != 200:
+                        logger.error(f"Ошибка загрузки файла: {upload_resp.status} {await upload_resp.text()}")
+                        return False
+                    upload_data = await upload_resp.json()
+                    file_token = upload_data.get("token") or upload_data.get("file_id")
+                    if not file_token:
+                        logger.error("В ответе нет токена загруженного файла")
+                        return False
+
+            payload = {
+                "chat_id": chat_id,
+                "text": caption or filename,
+                "attachments": [
+                    {
+                        "type": "file",
+                        "payload": {
+                            "file_id": file_token
+                        }
+                    }
+                ]
+            }
+            async with session.post(
+                f"{MAX_API_BASE}/messages",
+                headers=headers,
+                json=payload
+            ) as msg_resp:
+                if msg_resp.status != 200:
+                    logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status} {await msg_resp.text()}")
+                    return False
+
+        logger.info(f"✅ Документ {filename} успешно отправлен в чат {chat_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Исключение при отправке документа: {e}", exc_info=True)
+        return False
+
+# ==========================================
+# СОСТОЯНИЯ (FSM)
+# ==========================================
+
 class Registration(StatesGroup):
     waiting_for_consent = State()
     waiting_for_fio = State()
@@ -219,10 +289,6 @@ async def process_org(message, state: FSMContext):
         "Теперь я в вашем распоряжении. Вы можете задать мне любой вопрос или воспользоваться меню.",
         keyboard=get_main_menu()
     )
-
-# ==========================================
-# МЕНЮ И ОБРАТНАЯ СВЯЗЬ
-# ==========================================
 
 @router.message(Command("menu"))
 async def menu_handler(message, state: FSMContext):
@@ -304,7 +370,7 @@ async def process_feedback_comment(message, state: FSMContext):
     )
 
 # ==========================================
-# АДМИН-ПАНЕЛЬ (ВЫШЕ ОБРАБОТЧИКА ИИ!)
+# АДМИН-ПАНЕЛЬ
 # ==========================================
 
 @router.message(Command("admin"))
@@ -394,19 +460,20 @@ async def export_history(message):
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
-    try:
-        with open(file_path, "rb") as f:
-            await message.answer_document(document=f, filename="history.csv")
-    except AttributeError:
-        try:
-            with open(file_path, "rb") as f:
-                await bot.send_document(chat_id=message.chat.id, document=f, filename="history.csv")
-        except Exception as e:
-            logger.error(f"Ошибка отправки файла: {e}")
-            await message.answer("Файл сформирован, но отправить его не удалось (функция не поддерживается библиотекой).")
-    except Exception as e:
-        logger.error(f"Ошибка отправки файла: {e}")
-        await message.answer("Ошибка при отправке файла.")
+    chat_id = message.chat.id if hasattr(message, 'chat') and hasattr(message.chat, 'id') else None
+    if not chat_id:
+        await message.answer("Не удалось определить ID чата для отправки файла.")
+        return
+
+    success = await send_document_via_max_api(
+        chat_id=chat_id,
+        file_path=file_path,
+        filename="history.csv",
+        caption="📊 История диалогов"
+    )
+
+    if not success:
+        await message.answer("Файл сформирован, но отправить его не удалось. Попробуйте позже или обратитесь в поддержку.")
 
 @router.message(Command("upload"))
 async def admin_upload_start(message, state: FSMContext):
@@ -423,27 +490,42 @@ async def process_admin_file(message, state: FSMContext):
     if user_id not in ADMIN_IDS:
         return
 
-    if not hasattr(message.body, 'attachment') or not message.body.attachment:
+    # Ищем вложение типа "file" в массиве attachments
+    attachments = getattr(message.body, 'attachments', None) or []
+    file_attachment = None
+
+    for att in attachments:
+        att_type = getattr(att, 'type', None) or (att.get('type') if isinstance(att, dict) else None)
+        if att_type == 'file':
+            file_attachment = att
+            break
+
+    if not file_attachment:
         await message.answer("Вы не прикрепили файл. Пожалуйста, отправьте документ в формате PDF.")
         return
 
+    payload = getattr(file_attachment, 'payload', None) or (file_attachment.get('payload') if isinstance(file_attachment, dict) else None)
+    if not payload:
+        await message.answer("Не удалось прочитать данные файла.")
+        return
+
+    file_token = (
+        getattr(payload, 'token', None) or
+        getattr(payload, 'file_id', None) or
+        (payload.get('token') if isinstance(payload, dict) else None) or
+        (payload.get('file_id') if isinstance(payload, dict) else None)
+    )
+
+    if not file_token:
+        await message.answer("Не удалось распознать ID или токен файла.")
+        return
+
+    await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
+
+    url = f"{MAX_API_BASE}/files/{file_token}"
+    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
+
     try:
-        attachment = message.body.attachment
-        file_info = attachment.payload if hasattr(attachment, 'payload') else attachment
-        file_id = file_info.file_id or file_info.id if hasattr(file_info, 'file_id') else getattr(file_info, 'id', None)
-        
-        if not file_id and hasattr(file_info, 'file') and hasattr(file_info.file, 'id'):
-            file_id = file_info.file.id
-                
-        if not file_id:
-            await message.answer("Не удалось распознать ID файла.")
-            return
-
-        await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
-
-        url = f"https://platform-api2.max.ru/files/{file_id}"
-        headers = {"Authorization": f"Bearer {os.environ.get('MAX_BOT_TOKEN')}"}
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status == 200:
@@ -482,7 +564,7 @@ async def process_admin_file(message, state: FSMContext):
         await state.set_state(Registration.registered)
 
 # ==========================================
-# ОСНОВНОЙ ОБРАБОТЧИК ИИ (В САМОМ НИЗУ!)
+# ОСНОВНОЙ ОБРАБОТЧИК ИИ
 # ==========================================
 
 @router.message(Registration.registered)
@@ -491,7 +573,6 @@ async def ai_handler(message):
     if not user_text:
         return
 
-    # Защита от обработки команд как обычного текста
     if user_text.startswith("/"):
         return
 
