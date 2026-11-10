@@ -44,7 +44,7 @@ if admin_ids_str:
         logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-# Теперь это словарь: {хэш_файла: file_id_в_GigaChat}
+# Словарь: {хэш_файла: file_id_в_GigaChat}
 KNOWLEDGE_FILES = {}
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
@@ -120,7 +120,6 @@ def load_file_ids():
         try:
             with open(FILE_IDS_PATH, "r") as f:
                 data = json.load(f)
-                # Проверка на совместимость со старым форматом (если был список)
                 if isinstance(data, list):
                     KNOWLEDGE_FILES = {f"legacy_{i}": fid for i, fid in enumerate(data)}
                 else:
@@ -520,6 +519,7 @@ async def admin_upload_start(message, state: FSMContext):
 
 @router.message(AdminStates.waiting_for_file)
 async def process_admin_file(message, state: FSMContext):
+    global KNOWLEDGE_FILES  # <--- ИСПРАВЛЕНО: Объявлено в самом начале функции
     user_id = get_user_id(message)
     if user_id not in ADMIN_IDS:
         return
@@ -573,7 +573,6 @@ async def process_admin_file(message, state: FSMContext):
             return
 
         # ЕСЛИ ФАЙЛ НОВЫЙ — ЗАГРУЖАЕМ
-        global KNOWLEDGE_FILES
         with open(TEMP_UPLOAD_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
@@ -641,7 +640,6 @@ async def ai_handler(message):
             f"Вопрос пользователя: {user_text}"
         )
         
-        # Передаем уникальные ID файлов (значения из словаря)
         file_ids_list = list(KNOWLEDGE_FILES.values())
         
         chat_request = Chat(
