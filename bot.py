@@ -45,7 +45,6 @@ if admin_ids_str:
         logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-# Словарь: {хэш_файла: file_id_в_GigaChat}
 KNOWLEDGE_FILES = {}
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
@@ -441,7 +440,6 @@ async def show_user_history(message):
         await message.answer("⛔ Нет доступа.")
         return
 
-    # Ищем в тексте сообщения первое попавшееся число
     text_content = get_text(message)
     match = re.search(r'\d+', text_content)
     
@@ -458,7 +456,15 @@ async def show_user_history(message):
 
     text = f"📜 История диалога с {target_id} (последние 30 сообщений)\n\n"
     for role, msg_text, ts in reversed(history):
-        time_str = ts.strftime("%d.%m %H:%M") if ts else ""
+        # ИСПРАВЛЕНИЕ ОШИБКИ: Проверяем тип ts (строка или datetime)
+        if isinstance(ts, str):
+            # Если это строка, просто берем кусок с часами и минутами (обычно индексы 11:16)
+            time_str = ts[11:16] if len(ts) > 16 else ts
+        elif ts:
+            time_str = ts.strftime("%d.%m %H:%M")
+        else:
+            time_str = ""
+
         prefix = "👤" if role == "user" else "🤖"
         short_text = msg_text[:150] + "..." if len(msg_text) > 150 else msg_text
         text += f"[{time_str}] {prefix}: {short_text}\n\n"
