@@ -7,6 +7,7 @@ import datetime
 import csv
 import io
 import json
+import shutil
 import aiohttp
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
@@ -17,6 +18,7 @@ from maxgram.utils.keyboard import InlineKeyboardBuilder
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ giga = GigaChat(
     scope="GIGACHAT_API_PERS"
 )
 
+# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ---
 admin_ids_str = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = []
 if admin_ids_str:
@@ -42,7 +45,7 @@ if admin_ids_str:
         logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
 # --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-KNOWLEDGE_FILE_IDS = []  # Теперь это список ID
+KNOWLEDGE_FILE_IDS = []  # Список ID всех загруженных файлов
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
@@ -50,11 +53,13 @@ UOS_PHONE = "(383) 229-67-72"
 # Постоянные пути в Bothost
 DB_PATH = "/app/data/bot_history.db"
 FILE_IDS_PATH = "/app/data/file_ids.json"
+INITIAL_KB_PATH = "/app/data/knowledge_base.pdf"
 TEMP_UPLOAD_PATH = "/app/data/new_knowledge.pdf"
 
 MAX_API_BASE = "https://platform-api2.max.ru"
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN")
 
+# --- БАЗА ДАННЫХ (ИСТОРИЯ) ---
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -101,8 +106,7 @@ def get_user_history(user_id: int, limit: int = 50):
     conn.close()
     return rows
 
-# --- РАБОТА С СОХРАНЕНИЕМ ID ФАЙЛОВ ---
-
+# --- РАБОТА С ФАЙЛАМИ ЗНАНИЙ ---
 def load_file_ids():
     global KNOWLEDGE_FILE_IDS
     if os.path.exists(FILE_IDS_PATH):
@@ -152,15 +156,18 @@ def get_main_menu():
     builder.adjust(1)
     return builder
 
-async def upload_knowledge_base():
+async def upload_initial_knowledge_base():
     global KNOWLEDGE_FILE_IDS
-    load_file_ids()  # Загружаем сохраненные ID
+    load_file_ids()
     
     # Если нет сохраненных ID, но есть исходный файл в GitHub — загружаем его
     if not KNOWLEDGE_FILE_IDS and os.path.exists("knowledge_base.pdf"):
         try:
             logger.info("Загружаем исходный файл knowledge_base.pdf...")
-            with open("knowledge_base.pdf", "rb") as f:
+            if not os.path.exists(INITIAL_KB_PATH):
+                shutil.copy("knowledge_base.pdf", INITIAL_KB_PATH)
+                
+            with open(INITIAL_KB_PATH, "rb") as f:
                 uploaded = await giga.aupload_file(file=f, purpose="general")
                 file_id = (
                     getattr(uploaded, 'id', None) or
@@ -180,10 +187,7 @@ async def upload_knowledge_base():
     elif KNOWLEDGE_FILE_IDS:
         logger.info(f"✅ Бот использует {len(KNOWLEDGE_FILE_IDS)} ранее загруженных файлов.")
 
-# ==========================================
-# ОТПРАВКА ДОКУМЕНТОВ
-# ==========================================
-
+# --- ОТПРАВКА ДОКУМЕНТОВ (ИСПРАВЛЕНО) ---
 async def send_document_via_max_api(recipient_id: int, file_path: str, filename: str, caption: str = None, is_chat: bool = False) -> bool:
     headers = {"Authorization": MAX_BOT_TOKEN}
 
@@ -206,31 +210,36 @@ async def send_document_via_max_api(recipient_id: int, file_path: str, filename:
                         logger.error(f"Ошибка загрузки файла: {upload_resp.status}")
                         return False
                     upload_payload = await upload_resp.json()
+                    logger.info(f"Ответ после загрузки файла: {upload_payload}")
+
+            await asyncio.sleep(2)  # Пауза для обработки файла сервером
 
             url = f"{MAX_API_BASE}/messages?chat_id={recipient_id}" if is_chat else f"{MAX_API_BASE}/messages?user_id={recipient_id}"
-            token = upload_payload.get("token") or upload_payload.get("file_id")
-
+            
             payload = {
                 "text": caption or filename,
-                "attachments": [{"type": "file", "payload": {"token": token}}]
+                "attachments": [
+                    {
+                        "type": "file",
+                        "payload": upload_payload
+                    }
+                ]
             }
 
             async with session.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload) as msg_resp:
                 if msg_resp.status not in (200, 201):
-                    logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status}")
+                    error_text = await msg_resp.text()
+                    logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status} {error_text}")
                     return False
 
-        logger.info(f"✅ Документ {filename} успешно отправлен.")
+        logger.info(f"✅ Документ {filename} успешно отправлен получателю {recipient_id}")
         return True
 
     except Exception as e:
         logger.error(f"Исключение при отправке документа: {e}", exc_info=True)
         return False
 
-# ==========================================
-# СОСТОЯНИЯ (FSM)
-# ==========================================
-
+# --- СОСТОЯНИЯ (FSM) ---
 class Registration(StatesGroup):
     waiting_for_consent = State()
     waiting_for_fio = State()
@@ -299,6 +308,10 @@ async def process_org(message, state: FSMContext):
         "Теперь я в вашем распоряжении. Вы можете задать мне любой вопрос или воспользоваться меню.",
         keyboard=get_main_menu()
     )
+
+# ==========================================
+# МЕНЮ И ОБРАТНАЯ СВЯЗЬ
+# ==========================================
 
 @router.message(Command("menu"))
 async def menu_handler(message, state: FSMContext):
@@ -420,7 +433,7 @@ async def clear_knowledge_base(message):
 
     KNOWLEDGE_FILE_IDS = []
     save_file_ids()
-    await message.answer("🧹 База знаний полностью очищена! Бот больше не использует загруженные документы (ответы будут только на основе общих знаний GigaChat).")
+    await message.answer("🧹 База знаний полностью очищена! Бот больше не использует загруженные документы.")
 
 @router.message(Command("history"))
 async def show_user_history(message):
@@ -538,7 +551,6 @@ async def process_admin_file(message, state: FSMContext):
     headers = {"Authorization": MAX_BOT_TOKEN}
 
     try:
-        # Скачиваем файл во временный путь
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             async with session.get(file_url, headers=headers) as resp:
                 if resp.status == 200:
@@ -551,7 +563,6 @@ async def process_admin_file(message, state: FSMContext):
                     return
 
         global KNOWLEDGE_FILE_IDS
-        # Загружаем новый файл в GigaChat
         with open(TEMP_UPLOAD_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
@@ -565,9 +576,8 @@ async def process_admin_file(message, state: FSMContext):
                 new_file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
 
             if new_file_id:
-                # ДОБАВЛЯЕМ новый ID к существующим
                 KNOWLEDGE_FILE_IDS.append(new_file_id)
-                save_file_ids()  # Сохраняем обновленный список
+                save_file_ids()
                 
                 await thinking_msg.delete()
                 await message.answer(f"✅ Успешно! Новый документ добавлен в базу знаний.\nТеперь бот использует {len(KNOWLEDGE_FILE_IDS)} файлов для ответов.")
@@ -586,6 +596,10 @@ async def process_admin_file(message, state: FSMContext):
     
     finally:
         await state.set_state(Registration.registered)
+
+# ==========================================
+# ОСНОВНОЙ ОБРАБОТЧИК ИИ
+# ==========================================
 
 @router.message(Registration.registered)
 async def ai_handler(message):
@@ -616,13 +630,12 @@ async def ai_handler(message):
             f"Вопрос пользователя: {user_text}"
         )
         
-        # Передаем ВСЕ сохраненные ID файлов в attachments
         chat_request = Chat(
             messages=[
                 Messages(
                     role=MessagesRole.USER,
                     content=prompt_with_kb,
-                    attachments=KNOWLEDGE_FILE_IDS  # Список всех файлов
+                    attachments=KNOWLEDGE_FILE_IDS if KNOWLEDGE_FILE_IDS else []
                 )
             ]
         )
@@ -646,6 +659,10 @@ async def ai_handler(message):
     save_message(user_id, "bot", answer)
     await message.answer(text=answer)
 
+# ==========================================
+# БЛОКИРОВКИ И FALLBACK
+# ==========================================
+
 @router.message(Registration.waiting_for_consent)
 async def block_until_consent(message):
     await message.answer("Пожалуйста, сначала нажмите кнопку «✅ Я согласен» в сообщении выше, чтобы мы могли начать.")
@@ -659,11 +676,14 @@ async def fallback_handler(message, state: FSMContext):
     else:
         await message.answer("Я вас не совсем понял. Пожалуйста, нажмите /menu для выбора действия или /start для перезапуска.")
 
+# ==========================================
+# ЗАПУСК
+# ==========================================
 if __name__ == "__main__":
     print("Бот запущен...")
     async def main():
         init_db()
-        await upload_knowledge_base()
+        await upload_initial_knowledge_base()
         await dp.start_polling(bot)
     
     asyncio.run(main())
