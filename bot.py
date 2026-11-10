@@ -115,19 +115,21 @@ def get_file_hash(file_path: str) -> str:
     return hasher.hexdigest()
 
 def load_file_ids():
-    global KNOWLEDGE_FILES
     if os.path.exists(FILE_IDS_PATH):
         try:
             with open(FILE_IDS_PATH, "r") as f:
                 data = json.load(f)
+                KNOWLEDGE_FILES.clear() # Очищаем текущий словарь
                 if isinstance(data, list):
-                    KNOWLEDGE_FILES = {f"legacy_{i}": fid for i, fid in enumerate(data)}
+                    # Поддержка старого формата (просто список ID)
+                    for i, fid in enumerate(data):
+                        KNOWLEDGE_FILES[f"legacy_{i}"] = fid
                 else:
-                    KNOWLEDGE_FILES = data
+                    KNOWLEDGE_FILES.update(data) # Обновляем новыми данными
             logger.info(f"✅ Загружено {len(KNOWLEDGE_FILES)} файлов из хранилища.")
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки списка файлов: {e}")
-            KNOWLEDGE_FILES = {}
+            KNOWLEDGE_FILES.clear()
 
 def save_file_ids():
     try:
@@ -167,7 +169,6 @@ def get_main_menu():
     return builder
 
 async def upload_initial_knowledge_base():
-    global KNOWLEDGE_FILES
     load_file_ids()
     
     if not KNOWLEDGE_FILES and os.path.exists("knowledge_base.pdf"):
@@ -424,13 +425,12 @@ async def admin_panel(message):
 
 @router.message(Command("clear_kb"))
 async def clear_knowledge_base(message):
-    global KNOWLEDGE_FILES
     user_id = get_user_id(message)
     
     if user_id not in ADMIN_IDS:
         return
 
-    KNOWLEDGE_FILES = {}
+    KNOWLEDGE_FILES.clear() # Очищаем словарь
     save_file_ids()
     await message.answer("🧹 База знаний полностью очищена! Бот больше не использует загруженные документы.")
 
@@ -519,7 +519,6 @@ async def admin_upload_start(message, state: FSMContext):
 
 @router.message(AdminStates.waiting_for_file)
 async def process_admin_file(message, state: FSMContext):
-    global KNOWLEDGE_FILES  # <--- ИСПРАВЛЕНО: Объявлено в самом начале функции
     user_id = get_user_id(message)
     if user_id not in ADMIN_IDS:
         return
