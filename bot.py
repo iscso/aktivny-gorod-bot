@@ -6,6 +6,7 @@ import sqlite3
 import datetime
 import csv
 import io
+import json
 import aiohttp
 from maxgram import Bot, Dispatcher, Router, F
 from maxgram.filters import Command
@@ -40,15 +41,19 @@ if admin_ids_str:
     except Exception as e:
         logger.error(f"❌ Ошибка парсинга ADMIN_IDS: {e}")
 
-KNOWLEDGE_FILE_ID = None
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+KNOWLEDGE_FILE_IDS = []  # Теперь это список ID
 CONSENT_URL = "https://disk.yandex.ru/i/Our6yPmMIvXAig"
 TECH_SUPPORT_EMAIL = "support@iscso.ru"
 UOS_PHONE = "(383) 229-67-72"
-KNOWLEDGE_FILE_PATH = "knowledge_base.pdf"
+
+# Постоянные пути в Bothost
+DB_PATH = "/app/data/bot_history.db"
+FILE_IDS_PATH = "/app/data/file_ids.json"
+TEMP_UPLOAD_PATH = "/app/data/new_knowledge.pdf"
+
 MAX_API_BASE = "https://platform-api2.max.ru"
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN")
-
-DB_PATH = "/app/data/bot_history.db"
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -96,6 +101,28 @@ def get_user_history(user_id: int, limit: int = 50):
     conn.close()
     return rows
 
+# --- РАБОТА С СОХРАНЕНИЕМ ID ФАЙЛОВ ---
+
+def load_file_ids():
+    global KNOWLEDGE_FILE_IDS
+    if os.path.exists(FILE_IDS_PATH):
+        try:
+            with open(FILE_IDS_PATH, "r") as f:
+                KNOWLEDGE_FILE_IDS = json.load(f)
+            logger.info(f"✅ Загружено {len(KNOWLEDGE_FILE_IDS)} файлов из хранилища ID.")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки списка ID: {e}")
+            KNOWLEDGE_FILE_IDS = []
+
+def save_file_ids():
+    try:
+        with open(FILE_IDS_PATH, "w") as f:
+            json.dump(KNOWLEDGE_FILE_IDS, f)
+        logger.info(f"✅ Список ID файлов сохранен (всего {len(KNOWLEDGE_FILE_IDS)}).")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения списка ID: {e}")
+
+# --- УТИЛИТЫ ---
 def get_text(message) -> str:
     if hasattr(message, 'body') and hasattr(message.body, 'text'):
         return message.body.text or ""
@@ -126,97 +153,74 @@ def get_main_menu():
     return builder
 
 async def upload_knowledge_base():
-    global KNOWLEDGE_FILE_ID
-    try:
-        if not os.path.exists(KNOWLEDGE_FILE_PATH):
-            logger.warning(f"⚠️ Файл {KNOWLEDGE_FILE_PATH} не найден.")
-            return
-
-        with open(KNOWLEDGE_FILE_PATH, "rb") as f:
-            uploaded = await giga.aupload_file(file=f, purpose="general")
-            
-            file_id = (
-                getattr(uploaded, 'id', None) or
-                getattr(uploaded, 'id_', None) or
-                getattr(uploaded, 'file_id', None) or
-                getattr(uploaded, 'uuid', None)
-            )
-            if not file_id and hasattr(uploaded, '__dict__'):
-                file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
-
-            if file_id:
-                KNOWLEDGE_FILE_ID = file_id
-                logger.info(f"✅ База знаний загружена. FILE_ID: {KNOWLEDGE_FILE_ID}")
-            else:
-                logger.warning(f"⚠️ ID файла не найден.")
+    global KNOWLEDGE_FILE_IDS
+    load_file_ids()  # Загружаем сохраненные ID
+    
+    # Если нет сохраненных ID, но есть исходный файл в GitHub — загружаем его
+    if not KNOWLEDGE_FILE_IDS and os.path.exists("knowledge_base.pdf"):
+        try:
+            logger.info("Загружаем исходный файл knowledge_base.pdf...")
+            with open("knowledge_base.pdf", "rb") as f:
+                uploaded = await giga.aupload_file(file=f, purpose="general")
+                file_id = (
+                    getattr(uploaded, 'id', None) or
+                    getattr(uploaded, 'id_', None) or
+                    getattr(uploaded, 'file_id', None) or
+                    getattr(uploaded, 'uuid', None)
+                )
+                if not file_id and hasattr(uploaded, '__dict__'):
+                    file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
                 
-    except Exception as e:
-        logger.error(f"❌ Ошибка загрузки базы знаний: {e}")
+                if file_id:
+                    KNOWLEDGE_FILE_IDS.append(file_id)
+                    save_file_ids()
+                    logger.info(f"✅ Исходный файл загружен. ID: {file_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки исходного файла: {e}")
+    elif KNOWLEDGE_FILE_IDS:
+        logger.info(f"✅ Бот использует {len(KNOWLEDGE_FILE_IDS)} ранее загруженных файлов.")
 
 # ==========================================
-# ОТПРАВКА ДОКУМЕНТОВ (ИСПРАВЛЕНО ПОД MAX API)
+# ОТПРАВКА ДОКУМЕНТОВ
 # ==========================================
 
 async def send_document_via_max_api(recipient_id: int, file_path: str, filename: str, caption: str = None, is_chat: bool = False) -> bool:
-    """
-    Отправляет документ через прямой API MAX.
-    Для личных диалогов использует user_id, для групповых чатов — chat_id.
-    """
-    headers = {"Authorization": f"Bearer {MAX_BOT_TOKEN}"}
+    headers = {"Authorization": MAX_BOT_TOKEN}
 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-            # 1. Получаем URL для загрузки файла
-            async with session.post(
-                f"{MAX_API_BASE}/uploads?type=file",
-                headers=headers
-            ) as resp:
+            async with session.post(f"{MAX_API_BASE}/uploads?type=file", headers=headers) as resp:
                 if resp.status != 200:
-                    logger.error(f"Ошибка получения URL для загрузки: {resp.status} {await resp.text()}")
+                    logger.error(f"Ошибка получения URL: {resp.status}")
                     return False
                 upload_meta = await resp.json()
                 upload_url = upload_meta.get("url")
                 if not upload_url:
-                    logger.error("В ответе API нет URL для загрузки")
                     return False
 
-            # 2. Загружаем файл
             with open(file_path, "rb") as f:
                 form_data = aiohttp.FormData()
                 form_data.add_field("data", f, filename=filename)
                 async with session.post(upload_url, data=form_data) as upload_resp:
                     if upload_resp.status != 200:
-                        logger.error(f"Ошибка загрузки файла: {upload_resp.status} {await upload_resp.text()}")
+                        logger.error(f"Ошибка загрузки файла: {upload_resp.status}")
                         return False
                     upload_payload = await upload_resp.json()
 
-            # 3. Отправляем сообщение с файлом
-            # Для личных диалогов используем user_id в URL, для чатов — chat_id
-            if is_chat:
-                url = f"{MAX_API_BASE}/messages?chat_id={recipient_id}"
-            else:
-                url = f"{MAX_API_BASE}/messages?user_id={recipient_id}"
+            url = f"{MAX_API_BASE}/messages?chat_id={recipient_id}" if is_chat else f"{MAX_API_BASE}/messages?user_id={recipient_id}"
+            token = upload_payload.get("token") or upload_payload.get("file_id")
 
             payload = {
                 "text": caption or filename,
-                "attachments": [
-                    {
-                        "type": "file",
-                        "payload": upload_payload
-                    }
-                ]
+                "attachments": [{"type": "file", "payload": {"token": token}}]
             }
 
-            async with session.post(
-                url,
-                headers={**headers, "Content-Type": "application/json"},
-                json=payload
-            ) as msg_resp:
+            async with session.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload) as msg_resp:
                 if msg_resp.status not in (200, 201):
-                    logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status} {await msg_resp.text()}")
+                    logger.error(f"Ошибка отправки сообщения с файлом: {msg_resp.status}")
                     return False
 
-        logger.info(f"✅ Документ {filename} успешно отправлен получателю {recipient_id}")
+        logger.info(f"✅ Документ {filename} успешно отправлен.")
         return True
 
     except Exception as e:
@@ -388,20 +392,35 @@ async def admin_panel(message):
         return
 
     users = get_all_users()
-    if not users:
-        await message.answer("📭 История диалогов пока пуста.")
-        return
-
+    
     text = "👑 Админ-панель\n\n"
-    text += f"Всего пользователей: {len(users)}\n\n"
+    text += f"Всего пользователей: {len(users)}\n"
+    text += f"Файлов в базе знаний: {len(KNOWLEDGE_FILE_IDS)}\n\n"
     text += "Доступные команды:\n"
     text += "/history ID_ПОЛЬЗОВАТЕЛЯ — посмотреть историю\n"
-    text += "/upload — загрузить новый PDF с базой знаний\n"
+    text += "/upload — добавить новый PDF в базу знаний\n"
+    text += "/clear_kb — очистить базу знаний (удалить все файлы)\n"
     text += "/export — выгрузить всю историю в CSV файл\n\n"
-    text += "Доступные ID:\n"
-    text += ", ".join([f"{u}" for u in users[:20]])
+    
+    if users:
+        text += "Доступные ID:\n"
+        text += ", ".join([f"{u}" for u in users[:20]])
+    else:
+        text += "📭 История диалогов пока пуста."
     
     await message.answer(text=text)
+
+@router.message(Command("clear_kb"))
+async def clear_knowledge_base(message):
+    global KNOWLEDGE_FILE_IDS
+    user_id = get_user_id(message)
+    
+    if user_id not in ADMIN_IDS:
+        return
+
+    KNOWLEDGE_FILE_IDS = []
+    save_file_ids()
+    await message.answer("🧹 База знаний полностью очищена! Бот больше не использует загруженные документы (ответы будут только на основе общих знаний GigaChat).")
 
 @router.message(Command("history"))
 async def show_user_history(message):
@@ -466,7 +485,6 @@ async def export_history(message):
     with open(file_path, "w", encoding="utf-8-sig") as f:
         f.write(output.getvalue())
 
-    # Для личных диалогов используем user_id
     success = await send_document_via_max_api(
         recipient_id=user_id,
         file_path=file_path,
@@ -476,7 +494,7 @@ async def export_history(message):
     )
 
     if not success:
-        await message.answer("Файл сформирован, но отправить его не удалось. Попробуйте позже или обратитесь в поддержку.")
+        await message.answer("Файл сформирован, но отправить его не удалось.")
 
 @router.message(Command("upload"))
 async def admin_upload_start(message, state: FSMContext):
@@ -485,7 +503,7 @@ async def admin_upload_start(message, state: FSMContext):
         return
     
     await state.set_state(AdminStates.waiting_for_file)
-    await message.answer("📎 Пожалуйста, отправьте мне PDF-файл с обновленной базой знаний. Я его скачаю и обновлю свой «мозг».")
+    await message.answer("📎 Пожалуйста, отправьте мне новый PDF-файл для добавления в базу знаний. Я скачаю его и запомню.")
 
 @router.message(AdminStates.waiting_for_file)
 async def process_admin_file(message, state: FSMContext):
@@ -516,28 +534,25 @@ async def process_admin_file(message, state: FSMContext):
         await message.answer("Не удалось получить ссылку для скачивания файла.")
         return
 
-    thinking_msg = await message.answer("⏳ Скачиваю ваш документ и загружаю его в базу знаний. Подождите немного...")
+    thinking_msg = await message.answer("⏳ Скачиваю ваш документ и добавляю в базу знаний. Подождите немного...")
     headers = {"Authorization": MAX_BOT_TOKEN}
 
     try:
+        # Скачиваем файл во временный путь
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
             async with session.get(file_url, headers=headers) as resp:
                 if resp.status == 200:
                     content = await resp.read()
-                    with open(KNOWLEDGE_FILE_PATH, "wb") as f:
+                    with open(TEMP_UPLOAD_PATH, "wb") as f:
                         f.write(content)
                 else:
                     await thinking_msg.delete()
                     await message.answer(f"Ошибка скачивания файла (код {resp.status}).")
                     return
 
-        try:
-            await thinking_msg.delete()
-        except Exception:
-            pass
-
-        global KNOWLEDGE_FILE_ID
-        with open(KNOWLEDGE_FILE_PATH, "rb") as f:
+        global KNOWLEDGE_FILE_IDS
+        # Загружаем новый файл в GigaChat
+        with open(TEMP_UPLOAD_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
             new_file_id = (
@@ -550,10 +565,15 @@ async def process_admin_file(message, state: FSMContext):
                 new_file_id = uploaded.__dict__.get('id') or uploaded.__dict__.get('id_')
 
             if new_file_id:
-                KNOWLEDGE_FILE_ID = new_file_id
-                await message.answer("✅ Успешно! Новый документ загружен, и я уже начал использовать его для ответов на вопросы.")
-                logger.info(f"Админ обновил базу знаний. Новый FILE_ID: {KNOWLEDGE_FILE_ID}")
+                # ДОБАВЛЯЕМ новый ID к существующим
+                KNOWLEDGE_FILE_IDS.append(new_file_id)
+                save_file_ids()  # Сохраняем обновленный список
+                
+                await thinking_msg.delete()
+                await message.answer(f"✅ Успешно! Новый документ добавлен в базу знаний.\nТеперь бот использует {len(KNOWLEDGE_FILE_IDS)} файлов для ответов.")
+                logger.info(f"Админ добавил новый файл. Всего в базе: {len(KNOWLEDGE_FILE_IDS)}. Новый ID: {new_file_id}")
             else:
+                await thinking_msg.delete()
                 await message.answer("⚠️ Файл скачан, но не удалось получить его ID для GigaChat.")
                 
     except Exception as e:
@@ -590,18 +610,19 @@ async def ai_handler(message):
             "Твоя целевая аудитория — активисты ТОС, представители НКО и люди старшего поколения. Общайся просто, тепло и уважительно.\n\n"
             "Твои правила:\n"
             "1. Если пользователь задает светский вопрос (например, 'Как дела?', 'Привет', 'Кто ты?'), вежливо ответь ему и предложи свою помощь по вопросам ТОС, НКО, грантам или отчетности.\n"
-            "2. Если пользователь задает вопрос по профилю (о мерах поддержки, грантах, отчетности и т.д.), найди ответ в прикрепленном документе. Переформулируй текст из документа проще, чтобы он был понятен, но НЕ меняй суть и факты.\n"
-            f"3. Если в документе НЕТ ответа на профильный вопрос, строго ответь фразой: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n"
+            "2. Если пользователь задает вопрос по профилю (о мерах поддержки, грантах, отчетности и т.д.), найди ответ во ВСЕХ прикрепленных документах. Переформулируй текст проще, чтобы он был понятен, но НЕ меняй суть и факты.\n"
+            f"3. Если в документах НЕТ ответа на профильный вопрос, строго ответь фразой: «К сожалению, на сегодняшний день такой информацией я не располагаю. Пожалуйста, обратитесь в Управление общественных связей по телефону {UOS_PHONE}, там вам обязательно подскажут и помогут».\n"
             "4. Не выдумывай факты, не бери информацию из интернета.\n\n"
             f"Вопрос пользователя: {user_text}"
         )
         
+        # Передаем ВСЕ сохраненные ID файлов в attachments
         chat_request = Chat(
             messages=[
                 Messages(
                     role=MessagesRole.USER,
                     content=prompt_with_kb,
-                    attachments=[KNOWLEDGE_FILE_ID] if KNOWLEDGE_FILE_ID else []
+                    attachments=KNOWLEDGE_FILE_IDS  # Список всех файлов
                 )
             ]
         )
