@@ -63,6 +63,7 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # Таблица для сообщений
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,9 +73,24 @@ def init_db():
             timestamp DATETIME
         )
     """)
+    # Новая таблица для профилей пользователей
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            fio TEXT,
+            org TEXT
+        )
+    """)
     conn.commit()
     conn.close()
     logger.info(f"✅ База данных инициализирована: {DB_PATH}")
+
+def save_user_profile(user_id: int, fio: str, org: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("INSERT OR REPLACE INTO users (user_id, fio, org) VALUES (?, ?, ?)", (user_id, fio, org))
+    conn.commit()
+    conn.close()
 
 def save_message(user_id: int, role: str, text: str):
     conn = sqlite3.connect(DB_PATH)
@@ -86,13 +102,18 @@ def save_message(user_id: int, role: str, text: str):
     conn.commit()
     conn.close()
 
-def get_all_users():
+def get_all_users_with_names():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT user_id FROM messages")
-    users = [row[0] for row in cur.fetchall()]
+    # Берем всех, кто писал, и подтягиваем их ФИО, если оно есть
+    cur.execute("""
+        SELECT DISTINCT m.user_id, u.fio 
+        FROM messages m
+        LEFT JOIN users u ON m.user_id = u.user_id
+    """)
+    rows = cur.fetchall()
     conn.close()
-    return users
+    return rows
 
 def get_user_history(user_id: int, limit: int = 50):
     conn = sqlite3.connect(DB_PATH)
@@ -299,7 +320,14 @@ async def process_org(message, state: FSMContext):
         return
     await state.update_data(org=text)
     data = await state.get_data()
-    logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО={data.get('fio')} | Орг={data.get('org')} | MAX_ID={data.get('max_user_id')}")
+    max_user_id = data.get('max_user_id')
+    fio = data.get('fio')
+    
+    # СОХРАНЯЕМ ПРОФИЛЬ В БАЗУ ДАННЫХ
+    if max_user_id and fio:
+        save_user_profile(max_user_id, fio, text)
+        
+    logger.info(f"НОВЫЙ ПОЛЬЗОВАТЕЛЬ: ФИО={fio} | Орг={text} | MAX_ID={max_user_id}")
     await state.set_state(Registration.registered)
     await message.answer(
         "🎉 Спасибо! Регистрация успешно завершена.\n\n"
@@ -391,7 +419,7 @@ async def process_feedback_comment(message, state: FSMContext):
     )
 
 # ==========================================
-# АДМИН-ПАНЕЛЬ
+# АДМИН-ПАНЕЛЬ (ОБНОВЛЕНО)
 # ==========================================
 
 @router.message(Command("admin"))
@@ -402,7 +430,7 @@ async def admin_panel(message):
         await message.answer("⛔ У вас нет доступа к этой команде.")
         return
 
-    users = get_all_users()
+    users = get_all_users_with_names()
     
     text = "👑 Админ-панель\n\n"
     text += f"Всего пользователей: {len(users)}\n"
@@ -414,8 +442,11 @@ async def admin_panel(message):
     text += "/export — выгрузить всю историю в CSV файл\n\n"
     
     if users:
-        text += "Доступные ID:\n"
-        text += ", ".join([f"{u}" for u in users[:20]])
+        text += "Список пользователей:\n"
+        # Формируем нумерованный список с именами
+        for idx, (uid, fio) in enumerate(users, 1):
+            display_name = fio if fio else "Имя не указано"
+            text += f"{idx}. {display_name} (ID: {uid})\n"
     else:
         text += "📭 История диалогов пока пуста."
     
@@ -456,9 +487,7 @@ async def show_user_history(message):
 
     text = f"📜 История диалога с {target_id} (последние 30 сообщений)\n\n"
     for role, msg_text, ts in reversed(history):
-        # ИСПРАВЛЕНИЕ ОШИБКИ: Проверяем тип ts (строка или datetime)
         if isinstance(ts, str):
-            # Если это строка, просто берем кусок с часами и минутами (обычно индексы 11:16)
             time_str = ts[11:16] if len(ts) > 16 else ts
         elif ts:
             time_str = ts.strftime("%d.%m %H:%M")
@@ -483,7 +512,13 @@ async def export_history(message):
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT user_id, role, text, timestamp FROM messages ORDER BY timestamp")
+    # При экспорте тоже полезно видеть имена
+    cur.execute("""
+        SELECT m.user_id, u.fio, m.role, m.text, m.timestamp 
+        FROM messages m
+        LEFT JOIN users u ON m.user_id = u.user_id
+        ORDER BY m.timestamp
+    """)
     rows = cur.fetchall()
     conn.close()
 
@@ -493,7 +528,7 @@ async def export_history(message):
 
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';', quoting=csv.QUOTE_MINIMAL)
-    writer.writerow(['User ID', 'Role', 'Text', 'Timestamp'])
+    writer.writerow(['User ID', 'FIO', 'Role', 'Text', 'Timestamp'])
     for row in rows:
         writer.writerow(row)
 
