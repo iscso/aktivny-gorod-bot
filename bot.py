@@ -34,6 +34,7 @@ giga = GigaChat(
     scope="GIGACHAT_API_PERS"
 )
 
+# --- ЧТЕНИЕ ID АДМИНИСТРАТОРОВ ---
 admin_ids_str = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = []
 if admin_ids_str:
@@ -58,6 +59,7 @@ TEMP_UPLOAD_PATH = "/app/data/new_knowledge.pdf"
 MAX_API_BASE = "https://platform-api2.max.ru"
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN")
 
+# --- БАЗА ДАННЫХ ---
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -105,9 +107,7 @@ def get_user_history(user_id: int, limit: int = 50):
     return rows
 
 # --- РАБОТА С ФАЙЛАМИ ЗНАНИЙ ---
-
 def get_file_hash(file_path: str) -> str:
-    """Вычисляет MD5-хэш файла для проверки на дубликаты."""
     hasher = hashlib.md5()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
@@ -119,13 +119,12 @@ def load_file_ids():
         try:
             with open(FILE_IDS_PATH, "r") as f:
                 data = json.load(f)
-                KNOWLEDGE_FILES.clear() # Очищаем текущий словарь
+                KNOWLEDGE_FILES.clear()
                 if isinstance(data, list):
-                    # Поддержка старого формата (просто список ID)
                     for i, fid in enumerate(data):
                         KNOWLEDGE_FILES[f"legacy_{i}"] = fid
                 else:
-                    KNOWLEDGE_FILES.update(data) # Обновляем новыми данными
+                    KNOWLEDGE_FILES.update(data)
             logger.info(f"✅ Загружено {len(KNOWLEDGE_FILES)} файлов из хранилища.")
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки списка файлов: {e}")
@@ -430,7 +429,7 @@ async def clear_knowledge_base(message):
     if user_id not in ADMIN_IDS:
         return
 
-    KNOWLEDGE_FILES.clear() # Очищаем словарь
+    KNOWLEDGE_FILES.clear()
     save_file_ids()
     await message.answer("🧹 База знаний полностью очищена! Бот больше не использует загруженные документы.")
 
@@ -442,17 +441,16 @@ async def show_user_history(message):
         await message.answer("⛔ Нет доступа.")
         return
 
-    parts = get_text(message).split()
-    if len(parts) < 2:
-        await message.answer("Использование: /history ID_ПОЛЬЗОВАТЕЛЯ")
-        return
+    # Ищем в тексте сообщения первое попавшееся число
+    text_content = get_text(message)
+    match = re.search(r'\d+', text_content)
     
-    try:
-        target_id = int(parts[1])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
+    if not match:
+        await message.answer("Пожалуйста, укажите ID пользователя числом.\nПример: /history 4968370")
         return
 
+    target_id = int(match.group())
+    
     history = get_user_history(target_id, limit=30)
     if not history:
         await message.answer(f"Для пользователя {target_id} история не найдена.")
@@ -561,7 +559,6 @@ async def process_admin_file(message, state: FSMContext):
                     await message.answer(f"Ошибка скачивания файла (код {resp.status}).")
                     return
 
-        # ВЫЧИСЛЯЕМ ХЭШ И ПРОВЕРЯЕМ НА ДУБЛИКАТ
         new_file_hash = get_file_hash(TEMP_UPLOAD_PATH)
         
         if new_file_hash in KNOWLEDGE_FILES:
@@ -571,7 +568,6 @@ async def process_admin_file(message, state: FSMContext):
             await state.set_state(Registration.registered)
             return
 
-        # ЕСЛИ ФАЙЛ НОВЫЙ — ЗАГРУЖАЕМ
         with open(TEMP_UPLOAD_PATH, "rb") as f:
             uploaded = await giga.aupload_file(file=f, purpose="general")
             
